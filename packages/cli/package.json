@@ -1,0 +1,24 @@
+{
+  "name": "@editbay/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Editbay command line — headless video editing for humans and agents.",
+  "bin": {
+    "editbay": "./dist/cli.mjs"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@editbay/core": "workspace:*",
+    "@editbay/effects": "workspace:*",
+    "@editbay/engine": "workspace:*",
+    "@editbay/harness": "workspace:*",
+    "@editbay/kit": "workspace:*"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.0"
+  }
+}

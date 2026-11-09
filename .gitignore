@@ -19,3 +19,8 @@ archive/**/.gradle/
 .demo/
 apps/desktop/out/
 release-fix/
+
+evals/.media/
+evals/reports/
+packages/*/dist/
+.mcp-test/

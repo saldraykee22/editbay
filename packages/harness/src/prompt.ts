@@ -145,10 +145,7 @@ export function buildSystemPrompt(
       ? projectSummary
       : JSON.stringify(isProject(projectSummary) ? summarizeProject(projectSummary) : projectSummary, null, 2);
 
-  const fixedSections: string[] = [
-    roleSection(settings),
-    rulesSection(settings),
-  ];
+  const fixedSections: string[] = [roleSection(settings), rulesSection(settings), commandReferenceSection()];
 
   if (brand) fixedSections.push(renderBrand(brand));
   fixedSections.push(renderEffectIds(effectIds));
@@ -186,8 +183,7 @@ function roleSection(settings: AgentSettings): string {
   ].join('\n');
 }
 
-function rulesSection(settings: AgentSettings): string {
-  const mode =
+function rulesSection(settings: AgentSettings): string {  const mode =
     settings.autoApply === true
       ? 'Approval mode: auto-apply. Call `apply_commands` directly when the user asked for an edit.'
       : 'Approval mode: proposals. Do not call `apply_commands` for normal edits; instead return the proposed command array as a fenced ```json block in your final message so the user can review it. Only call `apply_commands` when the user explicitly says to apply now.';
@@ -210,8 +206,42 @@ function rulesSection(settings: AgentSettings): string {
   ].join('\n');
 }
 
-function renderBrand(brand: BrandProfile): string {
-  const lines = ['## Brand identity', '', `Brand: ${brand.name} (${brand.id})`];
+function commandReferenceSection(): string {
+  return [
+    '## Command reference',
+    '',
+    '`apply_commands` takes `{ "commands": [ { "op": "...", ...fields } ] }`. Times are integer milliseconds. Use only ids that exist in the project state.',
+    '',
+    '- `import_clip`: assetId, trackId?, index?',
+    '- `add_asset`: asset {id, kind, uri, label, durationMs}',
+    '- `trim_clip`: clipId, inMs?, outMs?',
+    '- `retime_clip`: clipId, inMs, outMs, startMs?',
+    '- `move_clip`: clipId, and exactly one of `after` (clip id or null) or `toIndex`',
+    '- `split_clip`: clipId, atMs (offset from the clip start)',
+    '- `duplicate_clip`: clipId',
+    '- `delete_clip`: clipId',
+    '- `set_volume`: clipId, volume (0..2)',
+    '- `set_audio_start`: clipId, startMs',
+    '- `set_clip_speed`: clipId, speed (0.25..4)',
+    '- `set_clip_transform`: clipId, transform {x, y, scale, rotation, opacity}',
+    '- `add_text`: text, startMs, durationMs, style?, animation? (none|fade|rise|typewriter)',
+    '- `edit_text`: itemId, text?, startMs?, durationMs?, style?, animation?',
+    '- `delete_text`: itemId',
+    '- `add_audio`: assetId, startMs?, inMs?, outMs?, volume?, fadeInMs?, fadeOutMs?',
+    '- `add_effect`: clipId, effect {type, params?, startMs?, durationMs?}',
+    '- `remove_effect`: clipId, effectId',
+    '- `add_transition`: clipId (the outgoing clip), transition {type, durationMs, params?}',
+    '- `remove_transition`: clipId',
+    '- `set_canvas`: width, height, fps?',
+    '- `set_project_name`: name',
+    '',
+    'Main video-track clips are sequential (order defines time). Overlay and audio clips use absolute `startMs`. Text items use `startMs`/`durationMs`.',
+    '',
+    'Example: `[{"op":"trim_clip","clipId":"c_abc","inMs":0,"outMs":2000},{"op":"add_text","text":"Merhaba","startMs":0,"durationMs":2000}]`',
+  ].join('\n');
+}
+
+function renderBrand(brand: BrandProfile): string {  const lines = ['## Brand identity', '', `Brand: ${brand.name} (${brand.id})`];
   if (brand.colors.length > 0) lines.push(`Colors: ${brand.colors.join(', ')}`);
   if (brand.fonts.length > 0) lines.push(`Fonts: ${brand.fonts.join(', ')}`);
   if (brand.logoPath !== undefined) lines.push('Logo: available in the workspace (path hidden)');

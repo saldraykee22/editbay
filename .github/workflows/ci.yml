@@ -23,6 +23,8 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm build
+      - run: pnpm build:cli
+      - run: pnpm build:mcp
 
   build:
     strategy:

@@ -34,11 +34,36 @@ packages/core       Project model, command engine, undo, change summaries (pure 
 packages/engine     FFprobe, FFmpeg filter graphs, export, thumbnails
 packages/harness    Providers, agent loop, tools, skills, memory, receipts
 packages/effects    Effect + transition catalog (preview style + ffmpeg mapping)
+packages/kit        Headless studio: file-backed project, import, export, skills, memory
+packages/cli        `editbay` command line (bundled, zero runtime deps)
+packages/mcp        MCP stdio server for external agents
 packages/ui         Design system (black/green cockpit, IBM Plex)
+evals               Agent evaluation harness (EVREN / OpenAI-compatible models)
 archive/kmp-prototype  The earlier Kotlin Multiplatform research prototype (kept for reference)
 ```
 
 **Platform plan:** desktop first. The same React UI is designed to be wrapped for Android then iOS (Capacitor shell + native media plugins); the core, engine contracts and harness are platform-agnostic. See [docs/platforms.md](docs/platforms.md).
+
+## Use it without the UI
+
+**CLI** — same project, same commands, same renderer:
+
+```bash
+pnpm build:cli
+node packages/cli/dist/cli.mjs init --name "Launch cut"
+node packages/cli/dist/cli.mjs import footage/*.mp4 music.mp3
+node packages/cli/dist/cli.mjs apply --json '[{"op":"trim_clip","clipId":"c_1","outMs":3000}]'
+node packages/cli/dist/cli.mjs export out.mp4
+```
+
+**MCP** — let Claude Code, Codex, OpenCode or your own agent edit the timeline:
+
+```bash
+pnpm build:mcp
+node packages/mcp/dist/server.mjs --project ./editbay.json
+```
+
+17 tools (`get_project`, `apply_commands`, `export_video`, `extract_frame`, skills, memory…). See [docs/cli.md](docs/cli.md) and [docs/mcp.md](docs/mcp.md).
 
 ## Quick start
 
