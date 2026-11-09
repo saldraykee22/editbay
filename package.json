@@ -24,7 +24,7 @@
     "typecheck": "tsc -p packages/core && tsc -p packages/effects && tsc -p packages/harness && tsc -p packages/engine && tsc -p packages/ui && pnpm --filter @editbay/desktop typecheck",
     "test": "vitest run",
     "test:watch": "vitest",
-    "e2e": "node scripts/e2e-app.mjs && node scripts/e2e-agent.mjs",
+    "e2e": "node scripts/e2e-app.mjs && node scripts/e2e-agent.mjs && node scripts/e2e-import.mjs",
     "lint": "eslint . --max-warnings 0",
     "format": "prettier --write ."
   },

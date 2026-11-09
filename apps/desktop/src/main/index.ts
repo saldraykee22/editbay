@@ -194,6 +194,10 @@ function registerIpc(): void {
   });
 
   ipcMain.handle('media:pick', async (): Promise<PickedMedia[]> => {
+    if (process.env['EDITBAY_TEST_IMPORT']) {
+      const paths = process.env['EDITBAY_TEST_IMPORT'].split(';').filter(Boolean);
+      return Promise.all(paths.map(probePicked));
+    }
     const result = await dialog.showOpenDialog({
       title: 'Import media',
       properties: ['openFile', 'multiSelections'],
