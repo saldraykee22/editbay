@@ -44,6 +44,7 @@ export function registerEditTools(server: McpServer, studio: HeadlessStudio): vo
       const started = Date.now();
       try {
         const report = await studio.apply(args.commands as unknown as EditCommand[]);
+        if (report.results.some((result) => result.ok)) await studio.flush();
         const durationMs = Date.now() - started;
         const results: CommandResultView[] = report.results.map((result) => {
           if (result.ok) return { ok: true, op: result.command.op };

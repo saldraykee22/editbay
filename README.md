@@ -25,6 +25,8 @@ Think of it as the Cursor of video editors: a workspace where the agent and the 
 - **Brand memory**: `brands/<id>/identity.md` plus dated memory notes, all human-readable markdown.
 - **Skills**: `SKILL.md` playbooks the agent loads when the request matches — built-in ones for rough cuts, captions, end cards, colour looks, delivery specs and effect authoring.
 - **Effect system**: parametric effects with one definition shared by preview (canvas) and export (FFmpeg filters). The agent can author new effects as code.
+- **Headless CLI** (`editbay`) and **MCP server** (`editbay-mcp`): the same project, commands and renderer without the UI, so external agents can edit video too.
+- **Eval harness**: a 10-case natural-language → command suite run against real models (EVREN / OpenAI-compatible).
 
 ## Architecture
 

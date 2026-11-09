@@ -6,8 +6,8 @@ import { execFileSync } from 'node:child_process';
 import { Agent, FileMemoryStore, FileSkillStore, NodeWorkspace, createOpenAICompatibleProvider } from '@editbay/harness';
 import { effectCatalog } from '@editbay/effects';
 import { HeadlessStudio } from '@editbay/kit';
-import type { AgentCommand, AgentEvent, AgentRuntime } from '@editbay/harness/types';
-import type { Project } from '@editbay/core';
+import type { AgentEvent, AgentRuntime } from '@editbay/harness/types';
+import type { AgentCommand, Project } from '@editbay/core';
 import { CASES, type EvalCase } from './cases';
 
 const ROOT = resolve(import.meta.dirname ?? '.', '..');
@@ -92,6 +92,26 @@ async function seedProject(media: { clips: string[]; music: string }, dir: strin
   return studio;
 }
 
+function withCallTimeout(provider: ReturnType<typeof createOpenAICompatibleProvider>, ms = 90_000): ReturnType<typeof createOpenAICompatibleProvider> {
+  return {
+    ...provider,
+    chat: (request, config) =>
+      new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(`provider call timed out after ${ms}ms`)), ms);
+        provider
+          .chat(request, config)
+          .then((response) => {
+            clearTimeout(timer);
+            resolve(response);
+          })
+          .catch((error: unknown) => {
+            clearTimeout(timer);
+            reject(error instanceof Error ? error : new Error(String(error)));
+          });
+      }),
+  };
+}
+
 interface CaseRun {
   events: AgentEvent[];
   result: EvalCaseResult;
@@ -105,18 +125,28 @@ async function runCase(model: string, evalCase: EvalCase, dir: string, media: { 
   const started = Date.now();
   let invalidCommands = 0;
   let appliedCommands = 0;
+  let abandoned = false;
 
-  const provider = createOpenAICompatibleProvider({
+  const baseProvider = createOpenAICompatibleProvider({
     id: 'evren',
     label: 'EVREN',
     requiresApiKey: true,
     defaultBaseUrl: process.env.EVREN_BASE_URL ?? 'https://evren-llmapi.ssyz.org.tr/v1',
     defaultModel: model,
   });
+  const timed = withCallTimeout(baseProvider, 75_000);
+  const provider = {
+    ...timed,
+    chat: (request: Parameters<typeof timed.chat>[0], config: Parameters<typeof timed.chat>[1]) =>
+      abandoned ? Promise.reject(new Error('turn abandoned')) : timed.chat(request, config),
+  };
 
   const runtime: AgentRuntime = {
     project: () => studio.project,
     applyCommands: (commands: AgentCommand[]) => {
+      if (abandoned) {
+        return { ok: false, project: studio.project, results: [], changes: [] };
+      }
       const report = studio.apply(commands);
       appliedCommands += report.results.filter((result) => result.ok).length;
       invalidCommands += report.results.filter((result) => !result.ok).length;
@@ -126,7 +156,7 @@ async function runCase(model: string, evalCase: EvalCase, dir: string, media: { 
     skills: new FileSkillStore({ root: workspaceRoot, builtinDir: BUILTIN_SKILLS }),
     memory: new FileMemoryStore(workspaceRoot),
     effects: effectCatalog,
-    settings: { providerId: 'evren', model, autoApply: true, temperature: 0.2, maxTokens: 4000, maxSteps: 8 },
+    settings: { providerId: 'evren', model, autoApply: true, temperature: 0.2, maxTokens: 4000, maxSteps: 6 },
   };
 
   const agent = new Agent({
@@ -137,14 +167,13 @@ async function runCase(model: string, evalCase: EvalCase, dir: string, media: { 
       baseUrl: process.env.EVREN_BASE_URL ?? 'https://evren-llmapi.ssyz.org.tr/v1',
       model,
     },
-    maxSteps: 8,
+    maxSteps: 6,
   });
 
   let message = '';
   let error: string | undefined;
   try {
-    const timeout = new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout after 240s')), 240_000));
-    const run = (async () => {
+    const timeout = new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout after 180s')), 180_000));    const run = (async () => {
       for await (const event of agent.run({ text: evalCase.prompt })) {
         events.push(event);
         if (verbose) {
@@ -158,6 +187,7 @@ async function runCase(model: string, evalCase: EvalCase, dir: string, media: { 
     })();
     await Promise.race([run, timeout]);
   } catch (caught) {
+    abandoned = true;
     error = caught instanceof Error ? caught.message : String(caught);
   }
 
@@ -213,14 +243,30 @@ async function main(): Promise<void> {
     console.error(`\n== model: ${model}`);
     for (const evalCase of cases) {
       const dir = await mkdtemp(join(tmpdir(), 'editbay-eval-'));
+      console.error(`CASE ${model} · ${evalCase.id}`);
       try {
         const { result } = await runCase(model, evalCase, dir, media);
         results.push(result);
         console.error(
           `${result.pass ? 'PASS' : 'FAIL'} ${pad(evalCase.id, 22)} ${String(result.ms).padStart(6)}ms  tools=${result.toolCalls} ok=${result.appliedCommands} bad=${result.invalidCommands}  ${result.detail}`,
         );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        results.push({
+          caseId: evalCase.id,
+          model,
+          pass: false,
+          detail: message,
+          ms: 0,
+          toolCalls: 0,
+          appliedCommands: 0,
+          invalidCommands: 0,
+          message: '',
+          error: message,
+        });
+        console.error(`FAIL ${pad(evalCase.id, 22)} runner error: ${message}`);
       } finally {
-        if (!keep) await rm(dir, { recursive: true, force: true });
+        if (!keep) void rm(dir, { recursive: true, force: true }).catch(() => undefined);
         else console.error(`kept ${dir}`);
       }
     }
