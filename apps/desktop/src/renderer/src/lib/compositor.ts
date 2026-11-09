@@ -9,7 +9,12 @@ import {
   type TextStyle,
   type TextItem,
 } from '@editbay/core';
-import type { EffectCatalog, FrameStyle } from '@editbay/effects';
+import {
+  transitionFrame,
+  type EffectCatalog,
+  type FrameStyle,
+  type TransitionLayer,
+} from '@editbay/effects';
 
 export type MediaElement = HTMLVideoElement | HTMLAudioElement | HTMLImageElement;
 
@@ -545,6 +550,40 @@ function drawOverlayLayer(
   ctx.restore();
 }
 
+/**
+ * Draws one side of a transition. Clip and offset/scale are applied in canvas
+ * space, then the regular clip layer (transform + effects) paints on top.
+ */
+function drawTransitionLayer(
+  ctx: CanvasRenderingContext2D,
+  active: ActiveClip,
+  layer: TransitionLayer,
+  projectWidth: number,
+  projectHeight: number,
+  options: DrawOptions,
+): void {
+  if (layer.alpha <= 0) return;
+  const clip = layer.clip;
+  if (clip && (clip.kind === 'circle' ? clip.r <= 0 : clip.w <= 0 || clip.h <= 0)) return;
+
+  ctx.save();
+  if (clip) {
+    ctx.beginPath();
+    if (clip.kind === 'rect') ctx.rect(clip.x, clip.y, clip.w, clip.h);
+    else ctx.arc(clip.cx, clip.cy, clip.r, 0, Math.PI * 2);
+    ctx.clip();
+  }
+  if (layer.scale !== 1) {
+    ctx.translate(projectWidth / 2 + layer.dx, projectHeight / 2 + layer.dy);
+    ctx.scale(layer.scale, layer.scale);
+    ctx.translate(-projectWidth / 2, -projectHeight / 2);
+  } else if (layer.dx !== 0 || layer.dy !== 0) {
+    ctx.translate(layer.dx, layer.dy);
+  }
+  drawClipLayer(ctx, active, layer.alpha, projectWidth, projectHeight, options);
+  ctx.restore();
+}
+
 export function drawFrame(
   ctx: CanvasRenderingContext2D,
   project: Project,
@@ -564,15 +603,19 @@ export function drawFrame(
   if (active.length === 1 && active[0]) {
     drawClipLayer(ctx, active[0], 1, projectWidth, projectHeight, options);
   } else if (active.length > 1) {
-    // Crossfade preview across `transitionOut`. Non-fade transition names share
-    // this neutral dissolve; the export still applies the real xfade.
+    // Real transition geometry: the same instructions the engine feeds to
+    // ffmpeg `xfade` (circleopen/zoomin are close approximations, see
+    // transition-preview.ts), so the preview shows the transition the export uses.
     const first = active[0];
     const second = active[1];
     if (first && second) {
       const overlap = Math.max(1, first.endMs - second.startMs);
       const progress = Math.max(0, Math.min(1, (timeMs - second.startMs) / overlap));
-      drawClipLayer(ctx, first, 1 - progress, projectWidth, projectHeight, options);
-      drawClipLayer(ctx, second, progress, projectWidth, projectHeight, options);
+      const transition = first.clip.transitionOut;
+      const xfade = (transition && catalog.transition(transition.type)?.xfade) || 'fade';
+      const frame = transitionFrame(xfade, progress, projectWidth, projectHeight);
+      drawTransitionLayer(ctx, first, frame.outgoing, projectWidth, projectHeight, options);
+      drawTransitionLayer(ctx, second, frame.incoming, projectWidth, projectHeight, options);
     }
   }
 
