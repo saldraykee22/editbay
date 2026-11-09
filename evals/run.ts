@@ -134,7 +134,7 @@ async function runCase(model: string, evalCase: EvalCase, dir: string, media: { 
     defaultBaseUrl: process.env.EVREN_BASE_URL ?? 'https://evren-llmapi.ssyz.org.tr/v1',
     defaultModel: model,
   });
-  const timed = withCallTimeout(baseProvider, 75_000);
+  const timed = withCallTimeout(baseProvider, Number(process.env.EVAL_CALL_TIMEOUT_MS ?? 75_000));
   const provider = {
     ...timed,
     chat: (request: Parameters<typeof timed.chat>[0], config: Parameters<typeof timed.chat>[1]) =>

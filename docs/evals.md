@@ -14,6 +14,7 @@ Reports land in `evals/reports/` (gitignored): JSON for tooling, Markdown for hu
 ## Setup
 
 - `EVREN_API_KEY` or `EVREN_BASE_URL` (default `https://evren-llmapi.ssyz.org.tr/v1`). Locally the runner also reads the EVREN key from `~/.config/opencode/opencode.json`.
+- `EVAL_CALL_TIMEOUT_MS` (default `75000`): per provider call. Reasoning models on shared gateways can exceed 75s on a cold start; use 180000 for full runs.
 - Any OpenAI-compatible endpoint works: point `EVREN_BASE_URL` at OpenRouter/LM Studio and pass `--models`.
 - FFmpeg must be on PATH (the seed project is generated with lavfi).
 
