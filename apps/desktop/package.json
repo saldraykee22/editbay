@@ -40,7 +40,8 @@
     "files": ["out/**/*", "package.json"],
     "extraResources": [
       { "from": "resources/skills", "to": "skills" },
-      { "from": "resources/fonts", "to": "fonts" }
+      { "from": "resources/fonts", "to": "fonts" },
+      { "from": "resources/ffmpeg", "to": "ffmpeg" }
     ],
     "win": { "target": ["nsis"] },
     "mac": { "target": ["dmg"], "category": "public.app-category.video" },

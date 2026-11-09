@@ -366,6 +366,7 @@ function registerIpc(): void {
       arch: process.arch,
       ffmpegPath: info?.path ?? null,
       ffmpegVersion: info?.version ?? null,
+      ffmpegSource: info?.source ?? null,
       workspaceRoot: workspaceRoot(),
       userData: app.getPath('userData'),
     };
@@ -623,8 +624,15 @@ if (!app.requestSingleInstanceLock()) {
 
   app.whenReady().then(() => {
     if (!process.env['EDITBAY_FFMPEG']) {
-      const bundled = join(process.resourcesPath, process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg');
-      if (existsSync(bundled)) process.env['EDITBAY_FFMPEG'] = bundled;
+      const executable = process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg';
+      // electron-builder copies `resources/ffmpeg` to `<resources>/ffmpeg`
+      // (see build.extraResources in apps/desktop/package.json). Keep the flat
+      // location as a fallback for older packages.
+      const bundled = [
+        join(process.resourcesPath, 'ffmpeg', executable),
+        join(process.resourcesPath, executable),
+      ].find((candidate) => existsSync(candidate));
+      if (bundled) process.env['EDITBAY_FFMPEG'] = bundled;
     }
     protocol.handle('editbay-media', (request) => {
       const url = new URL(request.url);

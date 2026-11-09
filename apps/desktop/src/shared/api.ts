@@ -48,6 +48,8 @@ export interface AppInfoDTO {
   arch: string;
   ffmpegPath: string | null;
   ffmpegVersion: string | null;
+  /** Where the binary came from: bundled build, EDITBAY_FFMPEG, or PATH. */
+  ffmpegSource: 'env' | 'bundled' | 'path' | null;
   workspaceRoot: string;
   userData: string;
 }

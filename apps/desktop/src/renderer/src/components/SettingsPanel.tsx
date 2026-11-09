@@ -16,6 +16,17 @@ export function SettingsPanel({
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<string | null>(null);
   const [oauthBusy, setOauthBusy] = useState(false);
+  const [ffmpeg, setFfmpeg] = useState<{ version: string | null; source: string | null } | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    void window.editbay.appInfo().then((info) => {
+      if (alive) setFfmpeg({ version: info.ffmpegVersion, source: info.ffmpegSource });
+    });
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   useEffect(() => {
     let alive = true;
@@ -186,6 +197,19 @@ export function SettingsPanel({
           />
           <span style={{ fontSize: 12.5 }}>Show title-safe guides</span>
         </label>
+      </Section>
+
+      <div className="hairline" />
+
+      <Section title="FFmpeg">
+        <div className="hint">
+          {ffmpeg?.version
+            ? `FFmpeg ${ffmpeg.version} · ${ffmpeg.source ?? 'unknown'} build · LGPL, no GPL codecs — replace it with EDITBAY_FFMPEG.`
+            : 'FFmpeg not found — install it on PATH or set EDITBAY_FFMPEG.'}{' '}
+          <a href="https://github.com/BtbN/FFmpeg-Builds" target="_blank" rel="noreferrer">
+            FFmpeg LGPL source
+          </a>
+        </div>
       </Section>
 
       <div className="hairline" />
