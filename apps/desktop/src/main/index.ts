@@ -170,6 +170,20 @@ function createWindow(): BrowserWindow {  const win = new BrowserWindow({
   });
 
   win.once('ready-to-show', () => win.show());
+  // Some Windows/Electron combinations never emit ready-to-show for hidden
+  // windows; showing after the DOM is ready guarantees the app is visible.
+  win.webContents.on('did-finish-load', () => {
+    if (!win.isDestroyed() && !win.isVisible()) {
+      win.show();
+      win.focus();
+    }
+  });
+  setTimeout(() => {
+    if (!win.isDestroyed() && !win.isVisible()) {
+      win.show();
+      win.focus();
+    }
+  }, 2500);
 
   if (isDev && process.env['ELECTRON_RENDERER_URL']) {
     void win.loadURL(process.env['ELECTRON_RENDERER_URL']);
@@ -384,26 +398,39 @@ function registerIpc(): void {
   });
 }
 
-app.whenReady().then(() => {
-  if (!process.env['EDITBAY_FFMPEG']) {
-    const bundled = join(process.resourcesPath, process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg');
-    if (existsSync(bundled)) process.env['EDITBAY_FFMPEG'] = bundled;
-  }
-  protocol.handle('editbay-media', (request) => {
-    const url = new URL(request.url);
-    const encoded = url.pathname.replace(/^\//, '');
-    const filePath = decodeURIComponent(encoded);
-    return net.fetch(pathToFileURL(filePath).toString());
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    const existing = BrowserWindow.getAllWindows()[0];
+    if (existing) {
+      if (existing.isMinimized()) existing.restore();
+      existing.show();
+      existing.focus();
+    }
   });
 
-  registerIpc();
-  seedSkills();
-  createWindow();
+  app.whenReady().then(() => {
+    if (!process.env['EDITBAY_FFMPEG']) {
+      const bundled = join(process.resourcesPath, process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg');
+      if (existsSync(bundled)) process.env['EDITBAY_FFMPEG'] = bundled;
+    }
+    protocol.handle('editbay-media', (request) => {
+      const url = new URL(request.url);
+      const encoded = url.pathname.replace(/^\//, '');
+      const filePath = decodeURIComponent(encoded);
+      return net.fetch(pathToFileURL(filePath).toString());
+    });
 
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    registerIpc();
+    seedSkills();
+    createWindow();
+
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    });
   });
-});
+}
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
