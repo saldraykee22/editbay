@@ -182,7 +182,12 @@ export function App() {
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
-      const typing = target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable);
+      const typing =
+        target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.tagName === 'SELECT' ||
+          target.isContentEditable);
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') {
         event.preventDefault();
         if (event.shiftKey) store.redo();
@@ -207,6 +212,7 @@ export function App() {
       if (typing) return;
       if (event.code === 'Space') {
         event.preventDefault();
+        if (store.playheadMs >= store.durationMs) store.setPlayhead(0);
         store.setPlaying(!store.playing);
       }
       if (event.key === 'Delete' || event.key === 'Backspace') {
@@ -244,40 +250,57 @@ export function App() {
           </div>
         </div>
         <div className="hairline" style={{ width: 1, height: 16, background: 'var(--line-strong)' }} />
-        <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
+        <div className="project-control">
           <input
             className="project-name"
             value={project.name}
+            aria-label="Project name"
             spellCheck={false}
+            size={Math.max(10, Math.min(28, (project.name || 'Untitled').length + 1))}
             onChange={(event) => store.apply({ op: 'set_project_name', name: event.target.value || 'Untitled' })}
           />
-          <IconButton icon="chevron" title="Project menu" size={13} onClick={() => setProjectMenu((value) => !value)} />
+          <button
+            type="button"
+            className={`project-menu-btn ${projectMenu ? 'open' : ''}`}
+            title="Project menu"
+            aria-label="Project menu"
+            aria-haspopup="menu"
+            aria-expanded={projectMenu}
+            onClick={() => setProjectMenu((value) => !value)}
+          >
+            <Icon name="chevronDown" size={12} />
+          </button>
           {projectMenu ? (
-            <div className="menu" onMouseLeave={() => setProjectMenu(false)}>
-              <button type="button" onClick={() => requestProjectChange('new')}>
+            <div className="menu" role="menu" onMouseLeave={() => setProjectMenu(false)}>
+              <button type="button" role="menuitem" onClick={() => requestProjectChange('new')}>
                 New project
               </button>
-              <button type="button" onClick={() => requestProjectChange('open')}>
+              <button type="button" role="menuitem" onClick={() => requestProjectChange('open')}>
                 Open project…
               </button>
-              <button type="button" onClick={() => void saveProject()}>
+              <button type="button" role="menuitem" onClick={() => void saveProject()}>
                 Save {store.projectPath ? '' : 'as…'}
               </button>
-              <button type="button" onClick={() => void saveProjectAs()}>
+              <button type="button" role="menuitem" onClick={() => void saveProjectAs()}>
                 Save as…
               </button>
               <div className="hairline" />
-              <button type="button" onClick={() => window.editbay.revealInFolder(appInfo?.workspaceRoot ?? '')}>
+              <button type="button" role="menuitem" onClick={() => window.editbay.revealInFolder(appInfo?.workspaceRoot ?? '')}>
                 Show workspace
               </button>
             </div>
           ) : null}
         </div>
         <Chip>{project.canvas.width}×{project.canvas.height}</Chip>
-        <Chip tone={agent.connected ? 'accent' : 'warn'}>
+        <button
+          type="button"
+          className={`chip chip-btn ${agent.connected ? 'accent' : 'warn'}`}
+          title="Configure model in Settings"
+          onClick={() => setTab('settings')}
+        >
           <span className={agent.connected ? 'dot-live' : undefined} />
           {agent.connected ? settings.model.split('/').pop() : 'No model'}
-        </Chip>
+        </button>
         <div className="titlebar-spacer" />
         {notice ? <Chip tone="accent">{notice}</Chip> : null}
         <Button size="sm" variant="ghost" icon="folder" onClick={importMedia}>
@@ -286,26 +309,54 @@ export function App() {
         <Button size="sm" variant="primary" icon="download" onClick={exportVideo}>
           Export
         </Button>
-        <IconButton icon="settings" title="Settings" onClick={() => setSettingsOpen(true)} />
+        <IconButton
+          icon="settings"
+          title="Settings"
+          active={tab === 'settings'}
+          onClick={() => setTab('settings')}
+        />
       </header>
 
       <div className="workspace">
-        <nav className="rail">
-          <button type="button" className={`rail-btn ${tab === 'agent' ? 'active' : ''}`} title="Agent" onClick={() => setTab('agent')}>
+        <nav className="rail" aria-label="Workspace navigation">
+          <button
+            type="button"
+            className={`rail-btn ${tab === 'agent' ? 'active' : ''}`}
+            title="AI Agent (Ctrl+K)"
+            aria-label="AI Agent"
+            aria-pressed={tab === 'agent'}
+            onClick={() => setTab('agent')}
+          >
             <Icon name="sparkles" size={17} />
           </button>
-          <button type="button" className="rail-btn" title="Import media" onClick={importMedia}>
+          <button
+            type="button"
+            className="rail-btn"
+            title="Import media"
+            aria-label="Import media"
+            onClick={importMedia}
+          >
             <Icon name="media" size={17} />
           </button>
-          <button type="button" className={`rail-btn ${tab === 'brand' ? 'active' : ''}`} title="Brand memory" onClick={() => setTab('brand')}>
+          <button
+            type="button"
+            className={`rail-btn ${tab === 'brand' ? 'active' : ''}`}
+            title="Brand memory"
+            aria-label="Brand memory"
+            aria-pressed={tab === 'brand'}
+            onClick={() => setTab('brand')}
+          >
             <Icon name="brand" size={17} />
           </button>
-          <button type="button" className={`rail-btn ${tab === 'skills' ? 'active' : ''}`} title="Skills" onClick={() => setTab('skills')}>
+          <button
+            type="button"
+            className={`rail-btn ${tab === 'skills' ? 'active' : ''}`}
+            title="Skills"
+            aria-label="Skills"
+            aria-pressed={tab === 'skills'}
+            onClick={() => setTab('skills')}
+          >
             <Icon name="layers" size={17} />
-          </button>
-          <div className="rail-spacer" />
-          <button type="button" className={`rail-btn ${tab === 'settings' ? 'active' : ''}`} title="Settings" onClick={() => setTab('settings')}>
-            <Icon name="settings" size={17} />
           </button>
         </nav>
 

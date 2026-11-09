@@ -30,8 +30,17 @@ export function IconButton({
   size = 16,
   ...rest
 }: ButtonHTMLAttributes<HTMLButtonElement> & { icon: string; active?: boolean; size?: number }) {
+  const ariaLabel = rest['aria-label'] ?? title;
+  const stateCls = active === true ? 'on' : active === false ? 'off' : '';
   return (
-    <button type="button" title={title} aria-label={title} className={`icon-btn ${active ? 'on' : ''} ${className ?? ''}`} {...rest}>
+    <button
+      type="button"
+      title={title}
+      aria-label={ariaLabel}
+      aria-pressed={active}
+      className={`icon-btn ${stateCls} ${className ?? ''}`.trim()}
+      {...rest}
+    >
       <Icon name={icon} size={size} />
     </button>
   );

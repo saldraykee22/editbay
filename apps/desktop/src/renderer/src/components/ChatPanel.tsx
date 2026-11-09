@@ -18,10 +18,9 @@ export type ChatEntry =
     };
 
 const QUICK_PROMPTS = [
-  'Tighten the intro and put the logo line at the end',
-  'Make a 15 second cut for Reels with captions',
-  'Add a calm fade between the first two clips',
-  'Grade the whole video warm and cinematic',
+  'Tighten the intro to 2 seconds',
+  'Add a warm cinematic grade',
+  'Put the brand title at the start',
 ];
 
 export function ChatPanel({
@@ -47,6 +46,7 @@ export function ChatPanel({
 }) {
   const [text, setText] = useState('');
   const logRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     const log = logRef.current;
@@ -87,22 +87,26 @@ export function ChatPanel({
                   </Button>
                 </div>
               </div>
-            ) : (
-              <div style={{ display: 'grid', gap: 6 }}>
-                <div className="label">Try</div>
-                {QUICK_PROMPTS.map((prompt) => (
-                  <button
-                    key={prompt}
-                    type="button"
-                    className="btn ghost"
-                    style={{ justifyContent: 'flex-start', height: 'auto', padding: '7px 9px', whiteSpace: 'normal', textAlign: 'left' }}
-                    onClick={() => onSend(prompt)}
-                  >
-                    {prompt}
-                  </button>
-                ))}
-              </div>
-            )}
+            ) : null}
+            <div style={{ display: 'grid', gap: 6 }}>
+              <div className="label">Example prompts</div>
+              {QUICK_PROMPTS.map((prompt) => (
+                <button
+                  key={prompt}
+                  type="button"
+                  className="prompt-card"
+                  onClick={() => {
+                    setText(prompt);
+                    inputRef.current?.focus();
+                  }}
+                >
+                  <span className="prompt-card-arrow" aria-hidden="true">
+                    →
+                  </span>
+                  <span>{prompt}</span>
+                </button>
+              ))}
+            </div>
           </div>
         ) : null}
 
@@ -182,6 +186,7 @@ export function ChatPanel({
 
       <div className="composer">
         <textarea
+          ref={inputRef}
           value={text}
           placeholder={connected ? 'Describe the edit…  (Enter to send, Shift+Enter for a new line)' : 'Connect a model first…'}
           onChange={(event) => setText(event.target.value)}
@@ -193,7 +198,6 @@ export function ChatPanel({
           }}
         />
         <div className="composer-row">
-          <Chip>{connected ? 'Ready' : 'No model'}</Chip>
           <div style={{ flex: 1 }} />
           <span className="kbd">Enter</span>
           {busy ? (

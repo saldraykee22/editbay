@@ -129,7 +129,7 @@ export function SkillsPanel() {
               {selected === skill.id ? (
                 <pre
                   className="mono"
-                  style={{ whiteSpace: 'pre-wrap', fontSize: 10.5, color: 'var(--text-dim)', margin: 0, userSelect: 'text' }}
+                  style={{ whiteSpace: 'pre-wrap', fontSize: 11, color: 'var(--text-dim)', margin: 0, userSelect: 'text' }}
                 >
                   {skill.body.slice(0, 1200)}
                 </pre>
