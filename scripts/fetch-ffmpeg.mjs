@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 /**
  * Fetch a distribution-safe FFmpeg build into `apps/desktop/resources/ffmpeg`
  * so electron-builder can bundle it as `resources/ffmpeg` in the installer.
