@@ -854,4 +854,89 @@ suite('engine e2e (real ffmpeg)', () => {
     const leftovers = existsSync(outDir) ? await readdir(outDir) : [];
     expect(leftovers.filter((name) => name.includes('.tmp-'))).toEqual([]);
   });
+
+  it('pads the video when overlay extends past main video and cuts music at project end', async () => {
+    const f = fixture();
+    // 2s blue video + 0-4s red logo overlay + 6s music
+    const bg = videoAsset('blue-2s', f.blue.path, f.blue.probe, 'Blue 2s');
+    const logo: Asset = {
+      id: 'logo-4s',
+      kind: 'image',
+      uri: f.logo.path,
+      label: 'Logo',
+      durationMs: 4000,
+      width: f.logo.probe.width,
+      height: f.logo.probe.height,
+      hasAudio: false,
+    };
+    const music: Asset = {
+      id: 'music-6s',
+      kind: 'audio',
+      uri: f.longMusic.path,
+      label: 'Music 6s',
+      durationMs: f.longMusic.probe.durationMs,
+      hasAudio: f.longMusic.probe.hasAudio,
+    };
+
+    const project: Project = {
+      schemaVersion: 2,
+      id: 'padded-overlay',
+      name: 'Padded overlay',
+      canvas: CANVAS,
+      assets: [bg, logo, music],
+      tracks: [
+        {
+          id: 'video',
+          kind: 'video',
+          clips: [makeClip('c-bg', 'blue-2s', { inMs: 0, outMs: 2000 })],
+          items: [],
+        },
+        {
+          id: 'overlay',
+          kind: 'overlay',
+          clips: [
+            makeClip('c-logo', 'logo-4s', {
+              inMs: 0,
+              outMs: 4000,
+              startMs: 0,
+              transform: { x: 0, y: 0, scale: 0.5, rotation: 0, opacity: 1 },
+            }),
+          ],
+          items: [],
+        },
+        {
+          id: 'audio',
+          kind: 'audio',
+          clips: [makeClip('c-music', 'music-6s', { inMs: 0, outMs: 6000, startMs: 0, volume: 0.5 })],
+          items: [],
+        },
+      ],
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    };
+
+    const outPath = path.join(f.dir, 'padded-overlay.mp4');
+    const plan = buildRenderPlan(project, {
+      assetPaths: assetPathsOf(project),
+      quality: 'draft',
+      outPath,
+    });
+    expect(plan.filterGraph).toContain('tpad=stop_mode=clone:stop_duration=2.000');
+
+    const result = await exportProject(project, {
+      outPath,
+      assetPaths: assetPathsOf(project),
+      quality: 'draft',
+    });
+    expect(result.sizeBytes).toBeGreaterThan(1000);
+
+    const probe = await probeMedia(outPath);
+    // duration is 4.0 ±0.1 s (3900ms - 4100ms)
+    expect(Math.abs(probe.durationMs - 4000)).toBeLessThanOrEqual(100);
+
+    // At t = 3.5s (3500ms), the center shows the red logo overlay (and not pure blue background)
+    const [r, g, b] = await centerPixel(outPath, 3500);
+    expect(r).toBeGreaterThan(180);
+    expect(b).toBeLessThan(90);
+  });
 });
