@@ -21,7 +21,7 @@
     "dev": "pnpm --filter @editbay/desktop dev",
     "build": "pnpm --filter @editbay/desktop build",
     "start": "pnpm --filter @editbay/desktop start",
-    "typecheck": "tsc -p packages/core && tsc -p packages/effects && tsc -p packages/harness && tsc -p packages/engine && tsc -p packages/kit && tsc -p packages/cli && tsc -p packages/mcp && tsc -p packages/ui && pnpm --filter @editbay/desktop typecheck",
+    "typecheck": "tsc -p packages/core && tsc -p packages/effects && tsc -p packages/harness && tsc -p packages/engine && tsc -p packages/kit && tsc -p packages/cli && tsc -p packages/mcp && tsc -p packages/ui && pnpm --filter @editbay/desktop typecheck && tsc -p evals/tsconfig.json",
     "test": "vitest run",
     "check": "pnpm typecheck && pnpm test",
     "test:watch": "vitest",

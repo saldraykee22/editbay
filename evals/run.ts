@@ -1,22 +1,21 @@
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { existsSync, readFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { execFileSync } from 'node:child_process';
 import { Agent, FileMemoryStore, FileSkillStore, NodeWorkspace, createOpenAICompatibleProvider } from '@editbay/harness';
 import { effectCatalog } from '@editbay/effects';
-import { HeadlessStudio } from '@editbay/kit';
 import type { AgentEvent, AgentRuntime } from '@editbay/harness/types';
 import type { AgentCommand, Project } from '@editbay/core';
-import { CASES, type EvalCase } from './cases';
+import { CASES, type EvalCase, type EvalRunContext, type EvalSet } from './cases';
+import { ensureMedia, seedProject, type EvalMedia } from './seed';
 
 const ROOT = resolve(import.meta.dirname ?? '.', '..');
 const BUILTIN_SKILLS = join(ROOT, 'apps/desktop/resources/skills');
-const MEDIA_DIR = join(ROOT, 'evals/.media');
 const REPORT_DIR = join(ROOT, 'evals/reports');
 
 interface EvalCaseResult {
   caseId: string;
+  set: EvalSet;
   model: string;
   pass: boolean;
   detail: string;
@@ -53,45 +52,6 @@ function evrenKey(): string {
   throw new Error('EVREN_API_KEY is not set and no key was found in ~/.config/opencode/opencode.json');
 }
 
-function ensureMedia(): { clips: string[]; music: string } {
-  const dir = MEDIA_DIR;
-  mkdirSync(dir, { recursive: true });
-  const clipA = join(dir, 'clip-a.mp4');
-  const clipB = join(dir, 'clip-b.mp4');
-  const clipC = join(dir, 'clip-c.mp4');
-  const music = join(dir, 'music.mp3');
-  if (!existsSync(clipA)) {
-    execFileSync('ffmpeg', ['-y', '-v', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=640x360:rate=30', '-f', 'lavfi', '-i', 'sine=frequency=420', '-t', '6', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', clipA]);
-  }
-  if (!existsSync(clipB)) {
-    execFileSync('ffmpeg', ['-y', '-v', 'error', '-f', 'lavfi', '-i', 'smptebars=size=640x360:rate=30', '-t', '5', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', clipB]);
-  }
-  if (!existsSync(clipC)) {
-    execFileSync('ffmpeg', ['-y', '-v', 'error', '-f', 'lavfi', '-i', 'color=c=0x1F6F4A:size=640x360:rate=30', '-t', '4', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', clipC]);
-  }
-  if (!existsSync(music)) {
-    execFileSync('ffmpeg', ['-y', '-v', 'error', '-f', 'lavfi', '-i', 'sine=frequency=220', '-t', '10', '-c:a', 'libmp3lame', music]);
-  }
-  return { clips: [clipA, clipB, clipC], music };
-}
-
-async function seedProject(media: { clips: string[]; music: string }, dir: string): Promise<HeadlessStudio> {
-  const studio = await HeadlessStudio.open({
-    projectPath: join(dir, 'editbay.json'),
-    workspaceRoot: join(dir, 'workspace'),
-    builtinSkillsDir: BUILTIN_SKILLS,
-    name: 'Eval project',
-  });
-  await studio.importMedia(media.clips);
-  await studio.importMedia([media.music]);
-  await studio.apply([
-    { op: 'add_text', text: 'Başlangıç yazısı', startMs: 0, durationMs: 2500 },
-    { op: 'add_text', text: 'Kapanış yazısı', startMs: 8000, durationMs: 2500 },
-  ]);
-  await studio.flush();
-  return studio;
-}
-
 function withCallTimeout(provider: ReturnType<typeof createOpenAICompatibleProvider>, ms = 90_000): ReturnType<typeof createOpenAICompatibleProvider> {
   return {
     ...provider,
@@ -117,9 +77,11 @@ interface CaseRun {
   result: EvalCaseResult;
 }
 
-async function runCase(model: string, evalCase: EvalCase, dir: string, media: { clips: string[]; music: string }): Promise<CaseRun> {
+async function runCase(model: string, evalCase: EvalCase, dir: string, media: EvalMedia): Promise<CaseRun> {
   const verbose = process.argv.includes('--verbose');
-  const studio = await seedProject(media, dir);
+  const studio = await seedProject(media, dir, evalCase.seed ?? 'base');
+  // Snapshot after seeding: cases that assert "nothing changed" compare against it.
+  const before = structuredClone(studio.project);
   const workspaceRoot = join(dir, 'workspace');
   const events: AgentEvent[] = [];
   const started = Date.now();
@@ -194,9 +156,18 @@ async function runCase(model: string, evalCase: EvalCase, dir: string, media: { 
   let pass = false;
   let detail = '';
   if (!error) {
-    const check = evalCase.check(studio.project);
-    pass = check.pass;
-    detail = check.detail;
+    const ctx: EvalRunContext = {
+      project: studio.project,
+      before,
+      appliedCommands,
+      invalidCommands,
+      message: message.trim(),
+      toolCalls: events.filter((event) => event.type === 'tool_start').length,
+    };
+    const check = evalCase.check(ctx.project);
+    const extra = evalCase.verify ? evalCase.verify(ctx) : undefined;
+    pass = check.pass && (extra?.pass ?? true);
+    detail = extra ? `${check.detail}; ${extra.detail}` : check.detail;
   } else {
     detail = error;
   }
@@ -206,6 +177,7 @@ async function runCase(model: string, evalCase: EvalCase, dir: string, media: { 
     events,
     result: {
       caseId: evalCase.id,
+      set: evalCase.set,
       model,
       pass,
       detail,
@@ -227,11 +199,22 @@ async function main(): Promise<void> {
   const models = (arg('models', 'deepseek-v4.1-flash') ?? '').split(',').map((value) => value.trim()).filter(Boolean);
   const only = (arg('cases') ?? '').split(',').map((value) => value.trim()).filter(Boolean);
   const keep = process.argv.includes('--keep');
-  const cases = only.length ? CASES.filter((entry) => only.includes(entry.id)) : CASES;
+  const setArg = (arg('set', 'v1') ?? 'v1').trim().toLowerCase();
+  if (setArg !== 'v1' && setArg !== 'v2' && setArg !== 'all') {
+    throw new Error(`--set must be v1, v2 or all (got "${setArg}")`);
+  }
+  const set = setArg as 'v1' | 'v2' | 'all';
+  const cases = CASES.filter((entry) => set === 'all' || entry.set === set).filter(
+    (entry) => only.length === 0 || only.includes(entry.id),
+  );
+  if (cases.length === 0) throw new Error(`No cases matched --set ${set} --cases ${only.join(',')}`);
 
   if (process.argv.includes('--dry')) {
-    console.error(`${cases.length} cases, models: ${models.join(', ')}`);
-    for (const evalCase of cases) console.error(`- ${evalCase.id}: ${evalCase.prompt}`);
+    console.error(`${cases.length} cases (set: ${set}), models: ${models.join(', ')}`);
+    for (const evalCase of cases) {
+      const seed = evalCase.seed && evalCase.seed !== 'base' ? ` seed=${evalCase.seed}` : '';
+      console.error(`- [${evalCase.set}] ${evalCase.id}${seed}: ${evalCase.prompt}`);
+    }
     return;
   }
 
@@ -254,6 +237,7 @@ async function main(): Promise<void> {
         const message = error instanceof Error ? error.message : String(error);
         results.push({
           caseId: evalCase.id,
+          set: evalCase.set,
           model,
           pass: false,
           detail: message,
@@ -273,23 +257,30 @@ async function main(): Promise<void> {
   }
 
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const jsonPath = join(REPORT_DIR, `${stamp}.json`);
-  const mdPath = join(REPORT_DIR, `${stamp}.md`);
-  await writeFile(jsonPath, JSON.stringify({ at: new Date().toISOString(), results }, null, 2), 'utf8');
+  const jsonPath = join(REPORT_DIR, `${stamp}-${set}.json`);
+  const mdPath = join(REPORT_DIR, `${stamp}-${set}.md`);
+  await writeFile(jsonPath, JSON.stringify({ at: new Date().toISOString(), set, models, results }, null, 2), 'utf8');
 
   const lines: string[] = [];
   lines.push(`# Editbay agent eval — ${new Date().toISOString()}`);
   lines.push('');
-  lines.push('| model | case | result | ms | tools | applied | invalid | detail |');
-  lines.push('|---|---|---|---|---|---|---|---|');
+  lines.push(`Set: **${set}** · models: **${models.join(', ')}**`);
+  lines.push('');
+  lines.push('| set | model | case | result | ms | tools | applied | invalid | detail |');
+  lines.push('|---|---|---|---|---|---|---|---|---|');
   for (const result of results) {
     lines.push(
-      `| ${result.model} | ${result.caseId} | ${result.pass ? 'PASS' : 'FAIL'} | ${result.ms} | ${result.toolCalls} | ${result.appliedCommands} | ${result.invalidCommands} | ${result.detail.replace(/\|/g, '/')} |`,
+      `| ${result.set} | ${result.model} | ${result.caseId} | ${result.pass ? 'PASS' : 'FAIL'} | ${result.ms} | ${result.toolCalls} | ${result.appliedCommands} | ${result.invalidCommands} | ${result.detail.replace(/\|/g, '/')} |`,
     );
   }
   const passCount = results.filter((result) => result.pass).length;
   lines.push('');
   lines.push(`**Score: ${passCount}/${results.length}**`);
+  for (const resultSet of ['v1', 'v2'] as const) {
+    const inSet = results.filter((result) => result.set === resultSet);
+    if (inSet.length === 0) continue;
+    lines.push(`**${resultSet} score: ${inSet.filter((result) => result.pass).length}/${inSet.length}**`);
+  }
   await writeFile(mdPath, lines.join('\n'), 'utf8');
 
   console.error(`\nScore: ${passCount}/${results.length}`);
