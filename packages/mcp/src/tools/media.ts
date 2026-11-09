@@ -51,8 +51,8 @@ export function registerMediaTools(server: McpServer, studio: HeadlessStudio): v
           }
           if (target.kind === 'overlay') {
             return errorResult(
-              `Track ${args.trackId} is an overlay track, which the renderer does not composite yet. ` +
-                'Import onto the video or audio track and place the clip with set_clip_transform.',
+              `Track ${args.trackId} is an overlay track; use the add_overlay command so its position, ` +
+                'scale and timing are explicit, or import onto the video or audio track.',
             );
           }
         }

@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   applyCommand,
   createEmptyProject,
+  EditSession,
   findAsset,
   findClip,
   mainVideoTrack,
@@ -444,6 +445,233 @@ describe('clip properties', () => {
     });
     expect(bad.ok).toBe(false);
     if (!bad.ok) expect(bad.error.code).toBe('out_of_range');
+  });
+});
+
+describe('overlay clips', () => {
+  const overlayClipOf = (project: Project, clipId: string) => findClip(project, clipId);
+
+  it('adds an overlay and maps canvas coordinates onto the clip transform', () => {
+    const result = applyOk(baseProject(), {
+      op: 'add_overlay',
+      assetId: IMAGE.id,
+      startMs: 1000,
+      durationMs: 4000,
+      x: 0.85,
+      y: 0.1,
+      scale: 0.2,
+    });
+
+    const clipId = result.createdIds.clip ?? '';
+    const location = overlayClipOf(result.project, clipId);
+    expect(location?.track.kind).toBe('overlay');
+    expect(location?.clip.startMs).toBe(1000);
+    expect(location?.clip.inMs).toBe(0);
+    expect(location?.clip.outMs).toBe(4000);
+    expect(location?.clip.transform).toEqual({
+      x: 0.35,
+      y: -0.4,
+      scale: 0.2,
+      rotation: 0,
+      opacity: 1,
+    });
+    expect(result.changes.join(' ')).toContain('Added overlay');
+  });
+
+  it('keeps an explicit opacity', () => {
+    const result = applyOk(baseProject(), {
+      op: 'add_overlay',
+      assetId: IMAGE.id,
+      startMs: 0,
+      durationMs: 1000,
+      x: 0.5,
+      y: 0.5,
+      scale: 0.3,
+      opacity: 0.4,
+    });
+    expect(overlayClipOf(result.project, result.createdIds.clip ?? '')?.clip.transform?.opacity).toBe(0.4);
+  });
+
+  it('rejects audio assets and geometry outside the allowed ranges', () => {
+    const project = baseProject();
+    const base = {
+      op: 'add_overlay' as const,
+      assetId: IMAGE.id,
+      startMs: 0,
+      durationMs: 1000,
+      x: 0.5,
+      y: 0.5,
+      scale: 0.2,
+    };
+
+    const audio = applyCommand(project, { ...base, assetId: MUSIC.id });
+    expect(audio.ok).toBe(false);
+    if (!audio.ok) expect(audio.error.code).toBe('invalid');
+
+    for (const patch of [
+      { x: 1.2 },
+      { x: -0.1 },
+      { y: 1.5 },
+      { scale: 0.01 },
+      { scale: 1.5 },
+      { opacity: 1.5 },
+      { startMs: 600_001 },
+      { durationMs: 50 },
+    ]) {
+      const result = applyCommand(project, { ...base, ...patch });
+      expect(result.ok, JSON.stringify(patch)).toBe(false);
+      if (!result.ok) expect(result.error.code).toBe('out_of_range');
+    }
+
+    const missingRange = applyCommand(project, { ...base, scale: Number.NaN });
+    expect(missingRange.ok).toBe(false);
+  });
+
+  it('limits a video overlay to the source length but leaves images unbounded', () => {
+    const project = baseProject();
+    const tooLong = applyCommand(project, {
+      op: 'add_overlay',
+      assetId: VIDEO.id,
+      startMs: 0,
+      durationMs: 5001,
+      x: 0.5,
+      y: 0.5,
+      scale: 0.2,
+    });
+    expect(tooLong.ok).toBe(false);
+    if (!tooLong.ok) expect(tooLong.error.code).toBe('out_of_range');
+
+    const video = applyOk(project, {
+      op: 'add_overlay',
+      assetId: VIDEO.id,
+      startMs: 0,
+      durationMs: 5000,
+      x: 0.5,
+      y: 0.5,
+      scale: 0.2,
+    });
+    expect(overlayClipOf(video.project, video.createdIds.clip ?? '')?.clip.outMs).toBe(5000);
+
+    // An image has no source timeline, so its overlay duration is free.
+    const image = applyOk(project, {
+      op: 'add_overlay',
+      assetId: IMAGE.id,
+      startMs: 0,
+      durationMs: 9000,
+      x: 0.5,
+      y: 0.5,
+      scale: 0.2,
+    });
+    expect(overlayClipOf(image.project, image.createdIds.clip ?? '')?.clip.outMs).toBe(9000);
+  });
+
+  it('updates position, scale, opacity, timing and duration in place', () => {
+    const added = applyOk(baseProject(), {
+      op: 'add_overlay',
+      assetId: IMAGE.id,
+      startMs: 1000,
+      durationMs: 2000,
+      x: 0.85,
+      y: 0.1,
+      scale: 0.2,
+    });
+    const clipId = added.createdIds.clip ?? '';
+
+    const updated = applyOk(added.project, {
+      op: 'set_overlay',
+      clipId,
+      startMs: 2500,
+      durationMs: 1500,
+      x: 0.2,
+      y: 0.3,
+      scale: 0.5,
+      opacity: 0.5,
+    });
+    const clip = overlayClipOf(updated.project, clipId)?.clip;
+    expect(clip?.startMs).toBe(2500);
+    expect((clip?.outMs ?? 0) - (clip?.inMs ?? 0)).toBe(1500);
+    expect(clip?.transform).toEqual({
+      x: -0.3,
+      y: -0.2,
+      scale: 0.5,
+      rotation: 0,
+      opacity: 0.5,
+    });
+    expect(updated.changes.join(' ')).toContain('Adjusted transform');
+  });
+
+  it('validates set_overlay ranges, target track and video duration', () => {
+    const added = applyOk(baseProject(), {
+      op: 'add_overlay',
+      assetId: VIDEO.id,
+      startMs: 0,
+      durationMs: 3000,
+      x: 0.5,
+      y: 0.5,
+      scale: 0.2,
+    });
+    const clipId = added.createdIds.clip ?? '';
+
+    for (const patch of [
+      { x: 2 },
+      { y: -1 },
+      { scale: 0 },
+      { opacity: -0.1 },
+      { durationMs: 5001 },
+      { startMs: -1 },
+    ]) {
+      const result = applyCommand(added.project, { op: 'set_overlay', clipId, ...patch });
+      expect(result.ok, JSON.stringify(patch)).toBe(false);
+      if (!result.ok) expect(result.error.code).toBe('out_of_range');
+    }
+
+    const empty = applyCommand(added.project, { op: 'set_overlay', clipId });
+    expect(empty.ok).toBe(false);
+    if (!empty.ok) expect(empty.error.code).toBe('invalid');
+
+    const { project, clipId: videoClipId } = projectWithClip();
+    const wrongTrack = applyCommand(project, { op: 'set_overlay', clipId: videoClipId, x: 0.5 });
+    expect(wrongTrack.ok).toBe(false);
+    if (!wrongTrack.ok) expect(wrongTrack.error.code).toBe('invalid');
+  });
+
+  it('deletes overlay clips with the shared delete_clip command', () => {
+    const added = applyOk(baseProject(), {
+      op: 'add_overlay',
+      assetId: IMAGE.id,
+      startMs: 0,
+      durationMs: 1000,
+      x: 0.5,
+      y: 0.5,
+      scale: 0.2,
+    });
+    const clipId = added.createdIds.clip ?? '';
+    const deleted = applyOk(added.project, { op: 'delete_clip', clipId });
+    expect(overlayClipOf(deleted.project, clipId)).toBeNull();
+    expect(deleted.changes.join(' ')).toContain('Removed overlay');
+  });
+
+  it('undoes and redoes an overlay edit', () => {
+    const session = new EditSession(baseProject());
+    const result = session.apply({
+      op: 'add_overlay',
+      assetId: IMAGE.id,
+      startMs: 500,
+      durationMs: 1000,
+      x: 0.5,
+      y: 0.5,
+      scale: 0.25,
+    });
+    expect(result.ok).toBe(true);
+    const clipId = result.ok ? result.createdIds.clip ?? '' : '';
+    const overlayClips = () => session.project.tracks.find((track) => track.kind === 'overlay')?.clips ?? [];
+    expect(overlayClips()).toHaveLength(1);
+
+    expect(session.undo()).toBe(true);
+    expect(overlayClips()).toHaveLength(0);
+
+    expect(session.redo()).toBe(true);
+    expect(overlayClips().map((clip) => clip.id)).toEqual([clipId]);
   });
 });
 

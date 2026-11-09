@@ -45,6 +45,8 @@ const MIN_TEXT_MS = 200;
 const MAX_TEXT_CHARS = 500;
 const MAX_START_MS = 600_000;
 const MAX_FADE_MS = 10_000;
+const MIN_OVERLAY_SCALE = 0.05;
+const MAX_OVERLAY_SCALE = 1;
 const ANIMATIONS: readonly TextAnimation[] = ['none', 'fade', 'rise', 'typewriter'];
 const ALIGNMENTS: readonly TextStyle['align'][] = ['left', 'center', 'right'];
 
@@ -249,6 +251,80 @@ function applyTransformPatch(
 
   clip.transform = merged;
   return null;
+}
+
+/** Validated overlay placement fields, as accepted by add_overlay/set_overlay. */
+interface OverlayPatch {
+  startMs?: number | null;
+  durationMs?: number | null;
+  x?: number;
+  y?: number;
+  scale?: number;
+  opacity?: number;
+}
+
+/**
+ * Range checks shared by `add_overlay` and `set_overlay`. `x`/`y` are canvas
+ * normalized (0..1) and `scale` is a fraction of the canvas width, so an
+ * out-of-range value is rejected instead of silently clamped.
+ */
+function validateOverlayPatch(patch: OverlayPatch): CommandError | null {
+  if (patch.startMs !== undefined) {
+    if (patch.startMs === null || patch.startMs < 0 || patch.startMs > MAX_START_MS) {
+      return errorWith('out_of_range', `startMs must be between 0 and ${MAX_START_MS}`);
+    }
+  }
+  if (patch.durationMs !== undefined) {
+    if (patch.durationMs === null || patch.durationMs < MIN_CLIP_MS) {
+      return errorWith('out_of_range', `durationMs must be at least ${MIN_CLIP_MS}`);
+    }
+    if (patch.durationMs > MAX_START_MS) {
+      return errorWith('out_of_range', `durationMs must be at most ${MAX_START_MS}`);
+    }
+  }
+  if (patch.x !== undefined && (!isFiniteNumber(patch.x) || patch.x < 0 || patch.x > 1)) {
+    return errorWith('out_of_range', 'x must be between 0 and 1 (normalized canvas position)');
+  }
+  if (patch.y !== undefined && (!isFiniteNumber(patch.y) || patch.y < 0 || patch.y > 1)) {
+    return errorWith('out_of_range', 'y must be between 0 and 1 (normalized canvas position)');
+  }
+  if (
+    patch.scale !== undefined &&
+    (!isFiniteNumber(patch.scale) || patch.scale < MIN_OVERLAY_SCALE || patch.scale > MAX_OVERLAY_SCALE)
+  ) {
+    return errorWith(
+      'out_of_range',
+      `scale must be between ${MIN_OVERLAY_SCALE} and ${MAX_OVERLAY_SCALE} (fraction of canvas width)`,
+    );
+  }
+  if (patch.opacity !== undefined && (!isFiniteNumber(patch.opacity) || patch.opacity < 0 || patch.opacity > 1)) {
+    return errorWith('out_of_range', 'opacity must be between 0 and 1');
+  }
+  return null;
+}
+
+/**
+ * Overlay clips keep their placement in `Transform`, whose `x`/`y` are offsets
+ * from the canvas centre. The command surface exposes plain canvas
+ * coordinates, so 0.5 becomes 0 and 0.85 becomes 0.35.
+ */
+function overlayTransform(
+  base: Transform,
+  x: number | undefined,
+  y: number | undefined,
+  scale: number | undefined,
+  opacity: number | undefined,
+): Transform {
+  const next: Transform = { ...base };
+  if (x !== undefined) next.x = x - 0.5;
+  if (y !== undefined) next.y = y - 0.5;
+  if (scale !== undefined) next.scale = scale;
+  if (opacity !== undefined) next.opacity = opacity;
+  return next;
+}
+
+function transformDefaults(clip: Clip): Transform {
+  return { ...DEFAULT_TRANSFORM, ...(clip.transform ?? {}) };
 }
 
 /** Validates in/out points against the source asset and the 100ms floor. */
@@ -799,6 +875,151 @@ function normalizeTrack(track: Track): void {
       }
       const problem = applyTransformPatch(location.clip, command.transform);
       if (problem) return { ok: false, error: problem };
+      return okOutcome();
+    }
+
+    case 'add_overlay': {
+      const asset = findAsset(draft, command.assetId);
+      if (!asset) {
+        return failOutcome(
+          'not_found',
+          `Asset '${command.assetId}' not found`,
+          assetHint(draft),
+        );
+      }
+      if (asset.kind === 'audio') {
+        return failOutcome(
+          'invalid',
+          `Asset '${asset.label}' is audio; overlays need an image or video asset`,
+        );
+      }
+      const track = trackByKind(draft, 'overlay');
+      if (!track) return failOutcome('not_found', 'The project has no overlay track');
+
+      if (
+        !isFiniteNumber(command.x) ||
+        !isFiniteNumber(command.y) ||
+        !isFiniteNumber(command.scale)
+      ) {
+        return failOutcome('invalid', 'x, y and scale are required numbers for add_overlay');
+      }
+
+      const startMs = toMs(command.startMs);
+      const durationMs = toMs(command.durationMs);
+      const problem = validateOverlayPatch({
+        startMs,
+        durationMs,
+        x: command.x,
+        y: command.y,
+        scale: command.scale,
+        opacity: command.opacity,
+      });
+      if (problem) return { ok: false, error: problem };
+      if (startMs === null || durationMs === null) {
+        return failOutcome('invalid', 'startMs and durationMs must be finite numbers');
+      }
+      if (asset.kind === 'video' && asset.durationMs > 0 && durationMs > asset.durationMs) {
+        return failOutcome(
+          'out_of_range',
+          `durationMs ${durationMs} exceeds asset duration ${asset.durationMs}`,
+          `Asset '${asset.label}' (${asset.id}) is ${asset.durationMs}ms long`,
+        );
+      }
+
+      const transform = overlayTransform(
+        DEFAULT_TRANSFORM,
+        command.x,
+        command.y,
+        command.scale,
+        command.opacity === undefined ? 1 : command.opacity,
+      );
+      const clip: Clip = {
+        id: createId('c'),
+        assetId: asset.id,
+        inMs: 0,
+        outMs: durationMs,
+        startMs,
+        effects: [],
+        transform,
+      };
+      track.clips.push(clip);
+      return okOutcome({ clip: clip.id });
+    }
+
+    case 'set_overlay': {
+      const location = findClip(draft, command.clipId);
+      if (!location) {
+        if (findTextItem(draft, command.clipId)) {
+          return failOutcome('invalid', 'Text items are edited with edit_text');
+        }
+        return failOutcome(
+          'not_found',
+          `Clip '${command.clipId}' not found`,
+          clipHint(draft),
+        );
+      }
+      if (location.track.kind !== 'overlay') {
+        return failOutcome(
+          'invalid',
+          `Clip '${command.clipId}' is not on an overlay track; use set_clip_transform or set_audio_start for other clips`,
+        );
+      }
+
+      const hasField =
+        command.startMs !== undefined ||
+        command.durationMs !== undefined ||
+        command.x !== undefined ||
+        command.y !== undefined ||
+        command.scale !== undefined ||
+        command.opacity !== undefined;
+      if (!hasField) {
+        return failOutcome(
+          'invalid',
+          'set_overlay needs at least one of startMs, durationMs, x, y, scale or opacity',
+        );
+      }
+
+      const startMs = command.startMs === undefined ? undefined : toMs(command.startMs);
+      const durationMs = command.durationMs === undefined ? undefined : toMs(command.durationMs);
+      const problem = validateOverlayPatch({
+        startMs,
+        durationMs,
+        x: command.x,
+        y: command.y,
+        scale: command.scale,
+        opacity: command.opacity,
+      });
+      if (problem) return { ok: false, error: problem };
+
+      const clip = location.clip;
+      if (startMs !== undefined) {
+        if (startMs === null) return failOutcome('invalid', 'startMs must be a finite number');
+        clip.startMs = startMs;
+      }
+      if (durationMs !== undefined) {
+        if (durationMs === null) return failOutcome('invalid', 'durationMs must be a finite number');
+        const asset = findAsset(draft, clip.assetId);
+        const speed = clip.speed && clip.speed > 0 ? clip.speed : 1;
+        const outMs = clip.inMs + Math.round(durationMs * speed);
+        if (asset && asset.kind !== 'image' && asset.durationMs > 0 && outMs > asset.durationMs) {
+          return failOutcome(
+            'out_of_range',
+            `durationMs ${durationMs} exceeds the source remaining from inMs (${Math.max(
+              0,
+              asset.durationMs - clip.inMs,
+            )}ms)`,
+            `Asset '${asset.label}' (${asset.id}) is ${asset.durationMs}ms long`,
+          );
+        }
+        clip.outMs = outMs;
+      }
+      clip.transform = overlayTransform(
+        transformDefaults(clip),
+        command.x,
+        command.y,
+        command.scale,
+        command.opacity,
+      );
       return okOutcome();
     }
 

@@ -691,11 +691,76 @@ describe('buildRenderPlan: validation', () => {
     expect(() => buildRenderPlan(project, { assetPaths: {} })).toThrow(/Asset "A1.mp4"/);
   });
 
-  it('warns instead of failing for overlay tracks', () => {
-    const project = makeProject();
-    project.tracks.push({ id: 'ot', kind: 'overlay', clips: [makeClip('o1', 'a2')], items: [] });
+  it('composites overlay tracks above the video and below text', () => {
+    const project = makeProject({
+      assets: [
+        makeAsset('a1'),
+        makeAsset('logo', 'image', { width: 200, height: 200, durationMs: 1000 }),
+      ],
+      textItems: [makeText('t1')],
+    });
+    project.tracks.push({
+      id: 'ot',
+      kind: 'overlay',
+      clips: [
+        makeClip('o1', 'logo', {
+          inMs: 0,
+          outMs: 1000,
+          startMs: 1000,
+          transform: { x: 0.35, y: -0.4, scale: 0.2, rotation: 0, opacity: 0.5 },
+        }),
+      ],
+      items: [],
+    });
+
     const plan = planFor(project);
-    expect(plan.warnings.some((warning) => warning.includes('Overlay tracks'))).toBe(true);
+    const graph = plan.filterGraph;
+
+    // 20% of the 1080px canvas, aspect kept, even pixels.
+    expect(graph).toContain('scale=w=216:h=-2');
+    expect(graph).toContain('colorchannelmixer=aa=0.5');
+    expect(graph).toContain(
+      "overlay=x=(main_w-overlay_w)/2+378:y=(main_h-overlay_h)/2+-768:enable='between(t,1.000,2.000)'",
+    );
+    // Images are looped with an explicit duration limit.
+    expect(plan.args).toContain('-loop');
+    // Overlay layers come after the base picture and before drawtext.
+    expect(graph.indexOf('overlay=x=(main_w-overlay_w)/2+378')).toBeLessThan(
+      graph.indexOf('drawtext='),
+    );
+    expect(plan.warnings.some((warning) => warning.includes('not composited'))).toBe(false);
+  });
+
+  it('rebases a video overlay with setpts and warns about its audio', () => {
+    const project = makeProject({ assets: [makeAsset('a1'), makeAsset('pip')] });
+    project.tracks.push({
+      id: 'ot',
+      kind: 'overlay',
+      clips: [makeClip('o1', 'pip', { inMs: 500, outMs: 2000, startMs: 1500 })],
+      items: [],
+    });
+
+    const plan = planFor(project);
+    expect(plan.filterGraph).toContain('setpts=PTS-STARTPTS+1.500/TB');
+    expect(plan.filterGraph).toContain(
+      "enable='between(t,1.500,3.000)'",
+    );
+    expect(plan.warnings.some((warning) => warning.includes('Audio of overlay clip o1'))).toBe(true);
+  });
+
+  it('skips an overlay clip whose asset is audio', () => {
+    const project = makeProject({
+      assets: [makeAsset('a1'), makeAsset('sound', 'audio')],
+    });
+    project.tracks.push({
+      id: 'ot',
+      kind: 'overlay',
+      clips: [makeClip('o1', 'sound')],
+      items: [],
+    });
+    const plan = planFor(project);
+    expect(plan.filterGraph).not.toContain('colorchannelmixer');
+    expect(plan.warnings.some((warning) => warning.includes('uses audio asset'))).toBe(true);
   });
 
   it('rejects an audio asset on a video track', () => {

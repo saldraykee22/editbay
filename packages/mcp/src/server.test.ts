@@ -196,7 +196,7 @@ describe('editbay mcp server', () => {
     expect(text).toContain('trim_clip');
     expect(text).toContain('assetId');
     expect(text).toContain('Example batch');
-    expect(text).toContain('not composited');
+    expect(text).toContain('add_overlay');
     expect(text).not.toContain('audio/overlay');
   });
 

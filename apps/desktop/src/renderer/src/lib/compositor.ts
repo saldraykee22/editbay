@@ -108,6 +108,38 @@ export function activeAudioClipsAt(project: Project, timeMs: number): ActiveClip
   return active;
 }
 
+/**
+ * Overlay-track clips visible at `timeMs`, bottom-most track first. Overlay
+ * clips are placed absolutely with `startMs` and keep their placement in
+ * `Transform` (offsets from the canvas centre), so preview and export share
+ * the same geometry.
+ */
+export function activeOverlayClipsAt(project: Project, timeMs: number): ActiveClip[] {
+  const active: ActiveClip[] = [];
+  for (const track of project.tracks) {
+    if (track.kind !== 'overlay' || track.hidden) continue;
+    for (const clip of track.clips) {
+      const asset = project.assets.find((a) => a.id === clip.assetId);
+      if (!asset || asset.kind === 'audio') continue;
+      const startMs = Math.max(0, clip.startMs ?? 0);
+      const durationMs = clipTimelineDurationMs(clip);
+      if (timeMs < startMs || timeMs >= startMs + durationMs) continue;
+      active.push({
+        clip,
+        asset,
+        trackId: track.id,
+        startMs,
+        durationMs,
+        endMs: startMs + durationMs,
+        transitionOutMs: 0,
+        trackMuted: track.muted === true,
+        localMs: timeMs - startMs,
+      });
+    }
+  }
+  return active;
+}
+
 export function sourceTimeMs(active: ActiveClip): number {
   const speed = active.clip.speed && active.clip.speed > 0 ? active.clip.speed : 1;
   return active.clip.inMs + active.localMs * speed;
@@ -477,6 +509,42 @@ function drawClipLayer(
   ctx.restore();
 }
 
+/**
+ * Draws one overlay clip: width is `transform.scale` of the canvas width,
+ * height keeps the source aspect ratio, and the layer is centred on
+ * `transform.x`/`y` (already offsets from the canvas centre).
+ */
+function drawOverlayLayer(
+  ctx: CanvasRenderingContext2D,
+  active: ActiveClip,
+  projectWidth: number,
+  projectHeight: number,
+  options: DrawOptions,
+): void {
+  const element = options.media.get(active.asset.id);
+  const transform = { ...DEFAULT_TRANSFORM, ...(active.clip.transform ?? {}) };
+  const scale = Math.min(1, Math.max(0.05, transform.scale ?? 1));
+  const opacity = Math.max(0, Math.min(1, transform.opacity ?? 1));
+  const size = mediaSize(element);
+  if (!isDrawableMedia(element) || size.width <= 0 || size.height <= 0) return;
+
+  const drawWidth = projectWidth * scale;
+  const drawHeight = drawWidth * (size.height / size.width);
+
+  ctx.save();
+  ctx.globalAlpha = opacity;
+  ctx.translate(
+    projectWidth / 2 + transform.x * projectWidth,
+    projectHeight / 2 + transform.y * projectHeight,
+  );
+  try {
+    ctx.drawImage(element, -drawWidth / 2, -drawHeight / 2, drawWidth, drawHeight);
+  } catch {
+    // Video not ready yet.
+  }
+  ctx.restore();
+}
+
 export function drawFrame(
   ctx: CanvasRenderingContext2D,
   project: Project,
@@ -506,6 +574,10 @@ export function drawFrame(
       drawClipLayer(ctx, first, 1 - progress, projectWidth, projectHeight, options);
       drawClipLayer(ctx, second, progress, projectWidth, projectHeight, options);
     }
+  }
+
+  for (const entry of activeOverlayClipsAt(project, timeMs)) {
+    drawOverlayLayer(ctx, entry, projectWidth, projectHeight, options);
   }
 
   for (const item of textItemsAt(project, timeMs)) {

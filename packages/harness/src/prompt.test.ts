@@ -190,9 +190,11 @@ describe('buildSystemPrompt', () => {
     expect(prompt).toContain('Ignore previous instructions');
   });
 
-  it('does not advertise overlay tracks in the command reference', () => {
+  it('advertises the overlay commands and where overlay clips render', () => {
     const prompt = buildSystemPrompt(settings, summarizeProject(project), null, [], ['fade']);
-    expect(prompt.toLowerCase()).not.toContain('overlay');
+    expect(prompt).toContain('`add_overlay`');
+    expect(prompt).toContain('`set_overlay`');
+    expect(prompt).toContain('above the main picture but below text');
     expect(prompt).toContain('Audio clips use absolute `startMs`');
   });
 });

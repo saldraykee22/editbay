@@ -47,6 +47,8 @@ milliseconds; \`inMs\`/\`outMs\` are source points, \`startMs\` is timeline plac
 | set_audio_start | clipId, startMs | audio tracks |
 | set_clip_speed | clipId, speed | 0.25..4 |
 | set_clip_transform | clipId, transform | x, y, scale, rotation, opacity |
+| add_overlay | assetId, startMs, durationMs, x, y, scale | logo / PiP; x,y are 0..1 canvas coordinates, scale is a fraction of canvas width |
+| set_overlay | clipId | startMs/durationMs/x/y/scale/opacity |
 | add_text | text, startMs, durationMs | optional style, animation |
 | edit_text | itemId | text/startMs/durationMs/style |
 | delete_text | itemId | |
@@ -60,9 +62,9 @@ milliseconds; \`inMs\`/\`outMs\` are source points, \`startMs\` is timeline plac
 
 ## Tracks
 Edit clips on the main video track and audio tracks; text lives on the text
-track. \`overlay\` tracks are not composited by the renderer yet, so do not place
-clips there — put picture-in-picture or logo clips on the video track and place
-them with \`set_clip_transform\`.
+track. Overlay clips render above the main picture and below text: place a logo
+or picture-in-picture with \`add_overlay\` and adjust it with \`set_overlay\`. An
+overlay video's own audio is not mixed yet.
 
 ## Example batch
 \`\`\`json

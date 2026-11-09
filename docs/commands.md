@@ -17,6 +17,8 @@ All times are integer milliseconds. Every command returns `{ ok, project, change
 | `set_audio_start` | `clipId`, `startMs` | Audio/overlay clips only. |
 | `set_clip_speed` | `clipId`, `speed` | 0.25–4. |
 | `set_clip_transform` | `clipId`, `transform` | x, y, scale, rotation, opacity. |
+| `add_overlay` | `assetId`, `startMs`, `durationMs`, `x`, `y`, `scale`, `opacity?` | Logo / product shot / PiP on the overlay track. `x`,`y` are normalized 0..1 canvas coordinates (the overlay is centred on that point), `scale` is a fraction of the canvas width (0.05–1). Images have no source-duration limit; a video overlay cannot run past its asset. |
+| `set_overlay` | `clipId`, `startMs?`, `durationMs?`, `x?`, `y?`, `scale?`, `opacity?` | Partial update of an overlay clip. |
 | `add_text` | `text`, `startMs`, `durationMs`, `style?` | Title/caption layer. |
 | `edit_text` | `itemId`, … | Partial update. |
 | `delete_text` | `itemId` | Remove. |

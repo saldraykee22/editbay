@@ -243,7 +243,9 @@ export function Timeline({ store }: { store: EditorStore }) {
     );
   };
 
-  const tracks = project.tracks.filter((t) => t.kind === 'video' || t.kind === 'text' || t.kind === 'audio').slice(0, 3);
+  const tracks = project.tracks
+    .filter((t) => t.kind === 'video' || t.kind === 'overlay' || t.kind === 'text' || t.kind === 'audio')
+    .slice(0, 4);
 
   return (
     <div className="timeline">
