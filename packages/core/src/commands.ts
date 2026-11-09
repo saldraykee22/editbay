@@ -19,6 +19,7 @@ import {
 } from './timeline';
 import type {
   ApplyFailure,
+  ApplyOptions,
   ApplyResult,
   ApplySuccess,
   Asset,
@@ -463,7 +464,11 @@ function normalizeTrack(track: Track): void {
 
 /* ------------------------------------------------------------------ */
 /* Command handlers                                                    */
-/* ------------------------------------------------------------------ */function runCommand(draft: Project, command: EditCommand): CommandOutcome {
+/* ------------------------------------------------------------------ */function runCommand(
+  draft: Project,
+  command: EditCommand,
+  options?: ApplyOptions,
+): CommandOutcome {
   switch (command.op) {
     case 'import_clip': {
       const asset = findAsset(draft, command.assetId);
@@ -813,6 +818,61 @@ function normalizeTrack(track: Track): void {
         );
       }
       location.clip.startMs = startMs;
+      return okOutcome();
+    }
+
+    case 'set_audio_fade': {
+      const location = findClip(draft, command.clipId);
+      if (!location) {
+        return failOutcome(
+          'not_found',
+          `Clip '${command.clipId}' not found`,
+          clipHint(draft),
+        );
+      }
+      // Audio-track clips and main-video clips both carry clip audio; overlay
+      // audio is not mixed, so a fade there would be a silent no-op.
+      if (location.track.kind !== 'audio' && location.track.kind !== 'video') {
+        return failOutcome(
+          'invalid',
+          'set_audio_fade works on audio clips and on main video clips',
+        );
+      }
+      if (command.fadeInMs === undefined && command.fadeOutMs === undefined) {
+        return failOutcome(
+          'invalid',
+          'set_audio_fade needs at least one of fadeInMs or fadeOutMs',
+        );
+      }
+      const asset = findAsset(draft, location.clip.assetId);
+      if (asset && (asset.kind === 'image' || asset.hasAudio === false)) {
+        return failOutcome(
+          'invalid',
+          `Clip '${location.clip.id}' has no audio to fade`,
+        );
+      }
+
+      const fadeInMs = command.fadeInMs === undefined ? undefined : toMs(command.fadeInMs);
+      const fadeOutMs = command.fadeOutMs === undefined ? undefined : toMs(command.fadeOutMs);
+      const duration = clipTimelineDurationMs(location.clip);
+      for (const [name, value] of [
+        ['fadeInMs', fadeInMs],
+        ['fadeOutMs', fadeOutMs],
+      ] as const) {
+        if (value === undefined) continue;
+        if (value === null || value < 0 || value > MAX_FADE_MS) {
+          return failOutcome('out_of_range', `${name} must be between 0 and ${MAX_FADE_MS}`);
+        }
+        if (value > duration) {
+          return failOutcome(
+            'out_of_range',
+            `${name} ${value} cannot exceed the clip duration (${duration}ms)`,
+          );
+        }
+      }
+
+      if (fadeInMs !== undefined && fadeInMs !== null) location.clip.audioFadeInMs = fadeInMs;
+      if (fadeOutMs !== undefined && fadeOutMs !== null) location.clip.audioFadeOutMs = fadeOutMs;
       return okOutcome();
     }
 
@@ -1265,6 +1325,23 @@ function normalizeTrack(track: Track): void {
       const type = typeof definition.type === 'string' ? definition.type.trim() : '';
       if (type === '') return failOutcome('invalid', 'effect.type must be a non-empty string');
 
+      // Effects render on the picture chain only. An effect that targets video
+      // on an audio clip reports success and changes nothing audible, so the
+      // track kind is checked here; audio is faded with `set_audio_fade`.
+      const target = options?.effectTarget?.(type) ?? 'video';
+      if (location.track.kind === 'audio' && target !== 'audio' && target !== 'both') {
+        return failOutcome(
+          'invalid',
+          `Effect '${type}' is a video effect and cannot be added to audio clip '${command.clipId}'; use set_audio_fade for audio fades`,
+        );
+      }
+      if (location.track.kind !== 'audio' && target === 'audio') {
+        return failOutcome(
+          'invalid',
+          `Effect '${type}' is an audio effect and cannot be added to a ${location.track.kind} clip; use set_audio_fade for audio fades`,
+        );
+      }
+
       const paramsProblem = validateParams(definition.params);
       if (paramsProblem) return { ok: false, error: paramsProblem };
 
@@ -1482,9 +1559,13 @@ function contentSignature(project: Project): string {
 }
 
 /** Applies one command to a clone of the project. Never mutates the input. */
-export function applyCommand(project: Project, command: EditCommand): ApplyResult {
+export function applyCommand(
+  project: Project,
+  command: EditCommand,
+  options?: ApplyOptions,
+): ApplyResult {
   const draft = structuredClone(project);
-  const outcome = runCommand(draft, command);
+  const outcome = runCommand(draft, command, options);
 
   if (!outcome.ok) {
     const failure: ApplyFailure = { ok: false, command, error: outcome.error };
@@ -1512,12 +1593,16 @@ export function applyCommand(project: Project, command: EditCommand): ApplyResul
  * Applies commands in order. Stops at the first failure and keeps the
  * successful prefix, so an agent can retry the failed step with fresh ids.
  */
-export function applyCommands(project: Project, commands: EditCommand[]): BatchResult {
+export function applyCommands(
+  project: Project,
+  commands: EditCommand[],
+  options?: ApplyOptions,
+): BatchResult {
   let current = project;
   const results: ApplyResult[] = [];
 
   for (const command of commands) {
-    const result = applyCommand(current, command);
+    const result = applyCommand(current, command, options);
     results.push(result);
     if (!result.ok) {
       return {

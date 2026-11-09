@@ -54,6 +54,14 @@ export interface TransitionInstance {
   params?: Record<string, EffectParam>;
 }
 
+/**
+ * Which track kinds an effect type may be attached to.
+ *
+ * The catalog is the source of truth; an effect that declares no target is a
+ * video effect. Audio is faded with `set_audio_fade`, not with an effect.
+ */
+export type EffectTarget = 'video' | 'audio' | 'both';
+
 export interface Clip {
   id: Id;
   assetId: Id;
@@ -224,6 +232,19 @@ export interface SetAudioStartCommand extends BaseCommand {
   startMs: number;
 }
 
+/**
+ * Sets the fade length of a clip's own audio. Works on audio clips and on
+ * main-video clips (their clip audio); omitted fields keep their value.
+ */
+export interface SetAudioFadeCommand extends BaseCommand {
+  op: 'set_audio_fade';
+  clipId: Id;
+  /** 0..10000, and never longer than the clip. */
+  fadeInMs?: number;
+  /** 0..10000, and never longer than the clip. */
+  fadeOutMs?: number;
+}
+
 export interface SetClipSpeedCommand extends BaseCommand {
   op: 'set_clip_speed';
   clipId: Id;
@@ -383,6 +404,7 @@ export type EditCommand =
   | DuplicateClipCommand
   | SetVolumeCommand
   | SetAudioStartCommand
+  | SetAudioFadeCommand
   | SetClipSpeedCommand
   | SetClipTransformCommand
   | AddOverlayCommand
@@ -455,6 +477,17 @@ export interface BatchResult {
   project: Project;
   results: ApplyResult[];
   changes: string[];
+}
+
+/**
+ * Consumer-supplied domain knowledge the pure engine cannot own.
+ *
+ * Core has no dependency on the effect catalog, so callers that own one (kit,
+ * desktop, eval) pass a target resolver. Omitted or unknown types are treated
+ * as video effects.
+ */
+export interface ApplyOptions {
+  effectTarget?: (type: string) => EffectTarget | undefined;
 }
 
 /* ------------------------------------------------------------------ */

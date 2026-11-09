@@ -7,7 +7,7 @@
 
 import { applyCommand, applyCommands } from './commands';
 import { createEmptyProject, validateProject } from './project';
-import type { ApplyResult, BatchResult, EditCommand, Project } from './types';
+import type { ApplyOptions, ApplyResult, BatchResult, EditCommand, Project } from './types';
 
 const HISTORY_LIMIT = 200;
 
@@ -34,16 +34,19 @@ export class EditSession {
   private undoStack: string[] = [];
   private redoStack: string[] = [];
   private readonly listeners = new Set<() => void>();
+  /** Domain knowledge the engine cannot own (see ApplyOptions). */
+  private readonly options: ApplyOptions;
 
-  constructor(project?: Project) {
+  constructor(project?: Project, options: ApplyOptions = {}) {
     this.current = structuredClone(project ?? createEmptyProject());
+    this.options = options;
   }
 
-  static create(name?: string): EditSession {
-    return new EditSession(createEmptyProject(name));
+  static create(name?: string, options: ApplyOptions = {}): EditSession {
+    return new EditSession(createEmptyProject(name), options);
   }
 
-  static fromJSON(json: string): EditSession {
+  static fromJSON(json: string, options: ApplyOptions = {}): EditSession {
     let parsed: unknown;
     try {
       parsed = JSON.parse(json);
@@ -53,7 +56,7 @@ export class EditSession {
     if (!isProject(parsed)) throw new Error('Invalid project JSON');
     const problems = validateProject(parsed);
     if (problems.length > 0) throw new Error(`Invalid project JSON: ${problems[0]}`);
-    return new EditSession(parsed);
+    return new EditSession(parsed, options);
   }
 
   get project(): Project {
@@ -70,7 +73,7 @@ export class EditSession {
 
   apply(command: EditCommand): ApplyResult {
     const before = this.current;
-    const result = applyCommand(before, command);
+    const result = applyCommand(before, command, this.options);
     if (!result.ok) return result;
 
     const changed = JSON.stringify(before) !== JSON.stringify(result.project);
@@ -84,7 +87,7 @@ export class EditSession {
 
   applyBatch(commands: EditCommand[]): BatchResult {
     const before = this.current;
-    const result = applyCommands(before, commands);
+    const result = applyCommands(before, commands, this.options);
     const changed = JSON.stringify(before) !== JSON.stringify(result.project);
     this.current = result.project;
     if (changed) {

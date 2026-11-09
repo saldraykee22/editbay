@@ -2,7 +2,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { EffectCatalog, parseCustomEffect } from './catalog';
+import { EffectCatalog, effectTargetOf, parseCustomEffect } from './catalog';
 
 const sourceDir = path.dirname(fileURLToPath(import.meta.url));
 
@@ -103,6 +103,29 @@ describe('parseCustomEffect', () => {
     expect(() => parseCustomEffect({ id: 'x', name: 'x', category: 'motion', filter: 42 })).toThrow(
       /filter must be a string/,
     );
+  });
+});
+
+describe('effect targets', () => {
+  it('falls back to video when an effect declares no target', () => {
+    expect(effectTargetOf('fade')).toBe('video');
+    expect(effectTargetOf('unknown-effect')).toBe('video');
+  });
+
+  it('keeps a declared target and rejects unknown ones', () => {
+    const definition = parseCustomEffect({
+      id: 'duck',
+      name: 'Duck',
+      category: 'audio',
+      params: [{ key: 'amount', type: 'number', default: 0.5 }],
+      target: 'audio',
+    });
+    expect(definition.target).toBe('audio');
+    const catalog = new EffectCatalog({ effects: [definition] });
+    expect(effectTargetOf('duck', catalog)).toBe('audio');
+    expect(() =>
+      parseCustomEffect({ id: 'x', name: 'x', category: 'audio', target: 'clip' }),
+    ).toThrow(/target must be one of/);
   });
 });
 

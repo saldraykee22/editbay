@@ -1,4 +1,4 @@
-import type { EffectInstance } from '@editbay/core';
+import type { EffectInstance, EffectTarget } from '@editbay/core';
 import type {
   EffectCategory,
   EffectDefinition,
@@ -80,6 +80,19 @@ export class EffectCatalog {
 export const effectCatalog = new EffectCatalog();
 
 /**
+ * Track kinds a registered effect may target.
+ *
+ * Effects run on the picture chain, so an effect that declares no target is a
+ * video effect. Audio clips fade with `set_audio_fade`, never with an effect.
+ */
+export function effectTargetOf(
+  type: string,
+  catalog: EffectCatalog = effectCatalog,
+): EffectTarget {
+  return catalog.effect(type)?.target ?? 'video';
+}
+
+/**
  * Parse a declarative workspace effect (JSON authored by an agent).
  *
  * No source is evaluated: a custom effect is data — metadata, param specs and
@@ -115,6 +128,12 @@ export function parseCustomEffect(json: unknown): EffectDefinition {
   const filter = typeof rawFilter === 'string' ? rawFilter.trim() : '';
   if (filter !== '') validateFilterTemplate(filter);
 
+  const rawTarget = json.target;
+  const target = EFFECT_TARGETS.find((candidate) => candidate === rawTarget);
+  if (rawTarget !== undefined && target === undefined) {
+    throw new Error(`Custom effect target must be one of ${EFFECT_TARGETS.join(', ')}`);
+  }
+
   const definition: EffectDefinition = {
     id,
     name,
@@ -123,6 +142,7 @@ export function parseCustomEffect(json: unknown): EffectDefinition {
     params,
     builtin: false,
   };
+  if (target !== undefined) definition.target = target;
 
   if (filter !== '') {
     definition.ffmpeg = (resolved) => renderFilterTemplate(filter, resolved);
@@ -132,6 +152,7 @@ export function parseCustomEffect(json: unknown): EffectDefinition {
 }
 
 const EFFECT_CATEGORIES: readonly EffectCategory[] = ['motion', 'color', 'texture', 'audio'];
+const EFFECT_TARGETS: readonly EffectTarget[] = ['video', 'audio', 'both'];
 const PARAM_TYPES: readonly EffectParamSpec['type'][] = ['number', 'color', 'select', 'boolean', 'text'];
 
 function isRecord(value: unknown): value is Record<string, unknown> {

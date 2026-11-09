@@ -146,6 +146,21 @@ export function describeChanges(before: Project, after: Project): string[] {
     if ((old.volume ?? 1) !== (clip.volume ?? 1)) {
       changes.push(`Set volume of '${label}' to ${String(Math.round((clip.volume ?? 1) * 100) / 100)}`);
     }
+    if (
+      (old.audioFadeInMs ?? 0) !== (clip.audioFadeInMs ?? 0) ||
+      (old.audioFadeOutMs ?? 0) !== (clip.audioFadeOutMs ?? 0)
+    ) {
+      const fadeIn = clip.audioFadeInMs ?? 0;
+      const fadeOut = clip.audioFadeOutMs ?? 0;
+      const parts: string[] = [];
+      if (fadeIn > 0) parts.push(`in ${seconds(fadeIn)}`);
+      if (fadeOut > 0) parts.push(`out ${seconds(fadeOut)}`);
+      changes.push(
+        parts.length > 0
+          ? `Set audio fade on '${label}' (${parts.join(', ')})`
+          : `Removed audio fade from '${label}'`,
+      );
+    }
     if (!sameTransform(old, clip)) {
       changes.push(`Adjusted transform of '${label}'`);
     }

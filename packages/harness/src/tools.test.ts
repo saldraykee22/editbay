@@ -255,6 +255,38 @@ describe('apply_commands', () => {
     expect(result.summary).toMatch(/runtime is not available/);
   });
 
+  it('surfaces clarify and unsupported replies instead of applying them', async () => {
+    let applied = 0;
+    const runtime = makeRuntime({
+      applyCommands: (commands) => {
+        applied += 1;
+        return {
+          ok: true,
+          project,
+          changes: [],
+          results: commands.map((command) => success(command)),
+        };
+      },
+    });
+
+    const clarify = await executeTool(
+      call('apply_commands', { commands: [{ op: 'clarify', question: 'Which music track?' }] }),
+      { runtime },
+    );
+    expect(clarify.ok).toBe(true);
+    expect(clarify.clarification).toBe('Which music track?');
+    expect(clarify.summary).toBe('Which music track?');
+
+    const unsupported = await executeTool(
+      call('apply_commands', {
+        commands: [{ op: 'unsupported', reason: 'Uploads are not supported.' }],
+      }),
+      { runtime },
+    );
+    expect(unsupported.clarification).toBe('Uploads are not supported.');
+    expect(applied).toBe(0);
+  });
+
   it('rejects malformed command arrays', async () => {
     const result = await executeTool(
       call('apply_commands', { commands: [{ nope: true }] }),

@@ -194,6 +194,20 @@ export class Agent {
                 continue;
               }
               const summary = commandsSummary(commands);
+              // A decline sent through the tool call must stop the turn, not
+              // become a proposal the user can apply.
+              const terminal = terminalMessage(commands);
+              if (terminal !== null) {
+                yield { type: 'tool_end', call, ok: true, summary: terminal };
+                messages.push({
+                  role: 'tool',
+                  content: JSON.stringify({ ok: true, summary: terminal }),
+                  toolCallId: call.id,
+                  name: call.name,
+                });
+                clarification = terminal;
+                continue;
+              }
               yield {
                 type: 'tool_end',
                 call,
