@@ -108,6 +108,11 @@ function num(value: number): string {
   return String(rounded);
 }
 
+/** Signed offset string for ffmpeg expressions (e.g. +216 or -216). */
+function formatOffset(offset: number): string {
+  return offset >= 0 ? `+${offset}` : `${offset}`;
+}
+
 /**
  * Escape a filesystem path for use inside a filter option value.
  * Forward slashes avoid backslash madness; the Windows drive colon and quote
@@ -442,6 +447,27 @@ export function atempoChain(speed: number): string[] {
   return chain;
 }
 
+/**
+ * Ensure audio fades do not exceed clip duration; scale down proportionally
+ * if their sum exceeds durationMs.
+ */
+export function resolveFades(
+  durationMs: number,
+  requestedInMs: number,
+  requestedOutMs: number,
+): { fadeInMs: number; fadeOutMs: number } {
+  const safeDur = Math.max(0, durationMs);
+  let fadeInMs = Math.min(safeDur, Math.max(0, requestedInMs));
+  let fadeOutMs = Math.min(safeDur, Math.max(0, requestedOutMs));
+  const sum = fadeInMs + fadeOutMs;
+  if (sum > safeDur && sum > 0) {
+    const scale = safeDur / sum;
+    fadeInMs = Math.round(fadeInMs * scale);
+    fadeOutMs = safeDur - fadeInMs;
+  }
+  return { fadeInMs, fadeOutMs };
+}
+
 /* ------------------------------------------------------------------ */
 /* Plan                                                               */
 /* ------------------------------------------------------------------ */
@@ -598,7 +624,7 @@ export function buildRenderPlan(project: Project, options: RenderPlanOptions): E
         `color=c=black:s=${width}x${height}:r=${num(fps)}:d=${sec(entry.durationMs)},format=rgba[${background}]`,
       );
       lines.push(
-        `[${background}][${layer}]overlay=x=(main_w-overlay_w)/2+${dx}:y=(main_h-overlay_h)/2+${dy}:shortest=1,format=yuv420p[${label}]`,
+        `[${background}][${layer}]overlay=x=(main_w-overlay_w)/2${formatOffset(dx)}:y=(main_h-overlay_h)/2${formatOffset(dy)}:shortest=1,format=yuv420p[${label}]`,
       );
     }
     videoLabels.push(label);
@@ -637,6 +663,15 @@ export function buildRenderPlan(project: Project, options: RenderPlanOptions): E
       lines.push(`[${accumulated}][${nextLabel}]concat=n=2:v=1:a=0[${outLabel}]`);
     }
     accumulated = outLabel;
+  }
+
+  // Freeze the last frame if the picture extends past the main video track (e.g.
+  // longer overlay or text), so overlays are not truncated prematurely.
+  const padMs = projectDurationMs(project) - mainTimeline.durationMs;
+  if (padMs > 0) {
+    const paddedLabel = 'vpad';
+    lines.push(`[${accumulated}]tpad=stop_mode=clone:stop_duration=${sec(padMs)}[${paddedLabel}]`);
+    accumulated = paddedLabel;
   }
 
   // Overlay tracks (logos, product shots, picture-in-picture) are composited
@@ -678,8 +713,13 @@ export function buildRenderPlan(project: Project, options: RenderPlanOptions): E
       } else {
         // Video overlays are pre-seeked by the demuxer, so they only need a
         // rebase onto their timeline position.
+        const speed = clampSpeed(clip.speed);
         filters.push(`trim=start=0:end=${sec(clip.outMs - clip.inMs)}`);
-        filters.push(`setpts=PTS-STARTPTS+${sec(startMs)}/TB`);
+        const setptsExpr =
+          speed === 1
+            ? `PTS-STARTPTS+${sec(startMs)}/TB`
+            : `(PTS-STARTPTS)/${num(speed)}+${sec(startMs)}/TB`;
+        filters.push(`setpts=${setptsExpr}`);
         filters.push('format=rgba');
         if (asset.hasAudio) {
           warnings.push(
@@ -695,7 +735,7 @@ export function buildRenderPlan(project: Project, options: RenderPlanOptions): E
       const outLabel = `vov${overlayIndex}`;
       lines.push(`[${inputIndex}:v]${filters.join(',')}[${overlayLabel}]`);
       lines.push(
-        `[${videoTail}][${overlayLabel}]overlay=x=(main_w-overlay_w)/2+${dx}:y=(main_h-overlay_h)/2+${dy}:enable='between(t,${sec(
+        `[${videoTail}][${overlayLabel}]overlay=x=(main_w-overlay_w)/2${formatOffset(dx)}:y=(main_h-overlay_h)/2${formatOffset(dy)}:enable='between(t,${sec(
           startMs,
         )},${sec(startMs + durationMs)})':eof_action=pass[${outLabel}]`,
       );
@@ -748,14 +788,9 @@ export function buildRenderPlan(project: Project, options: RenderPlanOptions): E
     // incoming clip — delayed to the xfade offset by `adelay` below — fades in
     // over it. An explicit fade longer than the transition wins.
     const transitionInMs = index > 0 ? (mainTimeline.clips[index - 1]?.transitionOutMs ?? 0) : 0;
-    const fadeInMs = Math.min(
-      durationMs,
-      Math.max(Math.max(0, clip.audioFadeInMs ?? 0), transitionInMs),
-    );
-    const fadeOutMs = Math.min(
-      durationMs,
-      Math.max(Math.max(0, clip.audioFadeOutMs ?? 0), entry.transitionOutMs),
-    );
+    const requestedInMs = Math.max(Math.max(0, clip.audioFadeInMs ?? 0), transitionInMs);
+    const requestedOutMs = Math.max(Math.max(0, clip.audioFadeOutMs ?? 0), entry.transitionOutMs);
+    const { fadeInMs, fadeOutMs } = resolveFades(durationMs, requestedInMs, requestedOutMs);
 
     const audioFilters = [
       `[${inputIndex}:a]atrim=start=0.000:end=${sec(clip.outMs - clip.inMs)}`,
@@ -821,13 +856,14 @@ export function buildRenderPlan(project: Project, options: RenderPlanOptions): E
       const inputIndex = addInput(assetPath, false, durationMs, { inMs: clip.inMs, outMs: clip.outMs });
       const startSec = startMs / 1000;
       const durationSec = durationMs / 1000;
-      const fadeInMs = Math.min(durationMs, Math.max(0, clip.audioFadeInMs ?? 0));
-      let fadeOutMs = Math.min(durationMs, Math.max(0, clip.audioFadeOutMs ?? 0));
+      const rawInMs = Math.max(0, clip.audioFadeInMs ?? 0);
+      let rawOutMs = Math.max(0, clip.audioFadeOutMs ?? 0);
       if (cutAtProjectEnd) {
         // Never cut a live audio bed without a ramp: 300 ms of fade-out unless
         // the user already asked for a longer one.
-        fadeOutMs = Math.max(fadeOutMs, Math.min(AUTO_CUT_FADE_MS, durationMs));
+        rawOutMs = Math.max(rawOutMs, Math.min(AUTO_CUT_FADE_MS, durationMs));
       }
+      const { fadeInMs, fadeOutMs } = resolveFades(durationMs, rawInMs, rawOutMs);
 
       const audioFilters = [
         `[${inputIndex}:a]atrim=start=0.000:end=${sec(sourceSpanMs)}`,

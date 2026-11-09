@@ -285,7 +285,7 @@ describe('buildRenderPlan: video', () => {
     expect(plan.filterGraph).toContain('rotate=0.174533');
     expect(plan.filterGraph).toContain('colorchannelmixer=aa=0.5');
     expect(plan.filterGraph).toContain('color=c=black:s=1080x1920');
-    expect(plan.filterGraph).toContain('overlay=x=(main_w-overlay_w)/2+108:y=(main_h-overlay_h)/2+-96');
+    expect(plan.filterGraph).toContain('overlay=x=(main_w-overlay_w)/2+108:y=(main_h-overlay_h)/2-96');
   });
 
   it('converts to rgba before scaling and rounds odd scaled sizes to even', () => {
@@ -584,9 +584,23 @@ describe('buildRenderPlan: audio', () => {
         ],
       }),
     );
-    expect(plan.filterGraph).toContain('afade=t=in:st=0.000:d=0.500');
-    // A fade-out as long as the clip is legal: 2s fade starting at 0.
-    expect(plan.filterGraph).toContain('afade=t=out:st=0.000:d=2.000');
+    // fadeInMs (500) + fadeOutMs (2000) > duration (2000) -> scaled proportionally to 400ms and 1600ms
+    expect(plan.filterGraph).toContain('afade=t=in:st=0.000:d=0.400');
+    expect(plan.filterGraph).toContain('afade=t=out:st=0.400:d=1.600');
+  });
+
+  it('scales down overlapping audio fades proportionally when fadeIn + fadeOut exceeds duration', () => {
+    const project = makeProject({
+      assets: [makeAsset('a1'), makeAsset('a3', 'audio')],
+      clips: [makeClip('c1', 'a1', { outMs: 2000 })],
+      audioClips: [
+        makeClip('c2', 'a3', { outMs: 800, audioFadeInMs: 500, audioFadeOutMs: 500 }),
+      ],
+    });
+    const plan = planFor(project);
+    // 500 + 500 = 1000 > 800 -> scaled to 400ms and 400ms
+    expect(plan.filterGraph).toContain('afade=t=in:st=0.000:d=0.400');
+    expect(plan.filterGraph).toContain('afade=t=out:st=0.400:d=0.400');
   });
 
   it('applies a full-length fade-out on an audio-track clip', () => {
@@ -807,7 +821,7 @@ describe('buildRenderPlan: validation', () => {
     expect(graph).toContain('scale=w=216:h=-2');
     expect(graph).toContain('colorchannelmixer=aa=0.5');
     expect(graph).toContain(
-      "overlay=x=(main_w-overlay_w)/2+378:y=(main_h-overlay_h)/2+-768:enable='between(t,1.000,2.000)'",
+      "overlay=x=(main_w-overlay_w)/2+378:y=(main_h-overlay_h)/2-768:enable='between(t,1.000,2.000)'",
     );
     // Images are looped with an explicit duration limit.
     expect(plan.args).toContain('-loop');
@@ -833,6 +847,30 @@ describe('buildRenderPlan: validation', () => {
       "enable='between(t,1.500,3.000)'",
     );
     expect(plan.warnings.some((warning) => warning.includes('Audio of overlay clip o1'))).toBe(true);
+  });
+
+  it('applies speed adjustment to video overlay clips', () => {
+    const project = makeProject({ assets: [makeAsset('a1'), makeAsset('pip')] });
+    project.tracks.push({
+      id: 'ot',
+      kind: 'overlay',
+      clips: [makeClip('o1', 'pip', { inMs: 0, outMs: 4000, startMs: 1500, speed: 2 })],
+      items: [],
+    });
+
+    const plan = planFor(project);
+    expect(plan.filterGraph).toContain('setpts=(PTS-STARTPTS)/2+1.500/TB');
+    expect(plan.filterGraph).toContain("enable='between(t,1.500,3.500)'");
+  });
+
+  it('pads the main video track when text extends beyond video duration', () => {
+    const project = makeProject({
+      clips: [makeClip('c1', 'a1', { inMs: 0, outMs: 2000 })],
+      textItems: [makeText('t1', { startMs: 0, durationMs: 4000 })],
+    });
+    const plan = planFor(project);
+    expect(plan.filterGraph).toContain('tpad=stop_mode=clone:stop_duration=2.000');
+    expect(plan.durationMs).toBe(4000);
   });
 
   it('skips an overlay clip whose asset is audio', () => {
