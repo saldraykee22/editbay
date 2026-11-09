@@ -90,7 +90,7 @@ export function activeClipAt(project: Project, timeMs: number): ActiveClip | nul
 export function activeAudioClipsAt(project: Project, timeMs: number): ActiveClip[] {
   const active: ActiveClip[] = [];
   for (const track of project.tracks) {
-    if (track.kind !== 'audio' || track.hidden) continue;
+    if (track.kind !== 'audio' || track.hidden || track.muted) continue;
     for (const clip of track.clips) {
       const asset = project.assets.find((a) => a.id === clip.assetId);
       if (!asset) continue;
@@ -105,7 +105,7 @@ export function activeAudioClipsAt(project: Project, timeMs: number): ActiveClip
         durationMs,
         endMs: startMs + durationMs,
         transitionOutMs: 0,
-        trackMuted: track.muted === true,
+        trackMuted: false,
         localMs: timeMs - startMs,
       });
     }
@@ -137,7 +137,7 @@ export function activeOverlayClipsAt(project: Project, timeMs: number): ActiveCl
         durationMs,
         endMs: startMs + durationMs,
         transitionOutMs: 0,
-        trackMuted: track.muted === true,
+        trackMuted: false,
         localMs: timeMs - startMs,
       });
     }

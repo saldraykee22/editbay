@@ -1,7 +1,7 @@
-import { useState } from 'react';
-import type { TextItem } from '@editbay/core';
+import { useEffect, useRef, useState } from 'react';
+import type { Clip, TextItem } from '@editbay/core';
 import { clipTimelineDurationMs } from '@editbay/core';
-import { Button, Field, Input, Modal, Select, Textarea } from '@editbay/ui';
+import { Button, Field, IconButton, Input, Modal, Select, Textarea } from '@editbay/ui';
 import { EditorStore, useEditorVersion } from '../state/store';
 
 export type InspectorTarget = { kind: 'text'; id: string } | { kind: 'clip'; id: string } | null;
@@ -10,6 +10,10 @@ export type InspectorTarget = { kind: 'text'; id: string } | { kind: 'clip'; id:
 function numberOr(value: string, fallback: number): number {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function round3(value: number): number {
+  return Math.round(value * 1000) / 1000;
 }
 
 export function Inspector({
@@ -22,11 +26,201 @@ export function Inspector({
   onClose: () => void;
 }) {
   useEditorVersion(store);
-  if (!target) return null;
-  return target.kind === 'text' ? (
-    <TextInspector store={store} itemId={target.id} onClose={onClose} />
-  ) : (
-    <ClipInspector store={store} clipId={target.id} onClose={onClose} />
+
+  const overlayTrack = store.project.tracks.find((track) => track.kind === 'overlay');
+  const selectedOverlayId =
+    store.selection.clipId ?? (target?.kind === 'clip' ? target.id : undefined);
+  const selectedOverlay = selectedOverlayId
+    ? overlayTrack?.clips.find((clip) => clip.id === selectedOverlayId)
+    : undefined;
+
+  return (
+    <>
+      {selectedOverlay ? (
+        <OverlayInspector
+          key={selectedOverlay.id}
+          store={store}
+          clip={selectedOverlay}
+          onClose={() => {
+            store.select({});
+            if (target?.kind === 'clip' && target.id === selectedOverlay.id) onClose();
+          }}
+        />
+      ) : null}
+      {target?.kind === 'text' ? (
+        <TextInspector store={store} itemId={target.id} onClose={onClose} />
+      ) : target?.kind === 'clip' && (!selectedOverlay || selectedOverlay.id !== target.id) ? (
+        <ClipInspector store={store} clipId={target.id} onClose={onClose} />
+      ) : null}
+    </>
+  );
+}
+
+function OverlaySliderField({
+  label,
+  name,
+  value,
+  min,
+  max,
+  step = 0.01,
+  onCommit,
+}: {
+  label: string;
+  name: 'x' | 'y' | 'scale' | 'opacity';
+  value: number;
+  min: number;
+  max: number;
+  step?: number;
+  onCommit: (next: number) => void;
+}) {
+  const [draft, setDraft] = useState(String(value));
+  const draggingRef = useRef(false);
+  const numInputRef = useRef<HTMLInputElement>(null);
+  const commitRef = useRef<(raw: string) => void>(() => undefined);
+
+  useEffect(() => {
+    setDraft(String(value));
+  }, [value]);
+
+  const commitRaw = (raw: string) => {
+    const parsed = Number(raw);
+    if (!Number.isFinite(parsed)) {
+      setDraft(String(value));
+      return;
+    }
+    const clamped = round3(Math.min(max, Math.max(min, parsed)));
+    setDraft(String(clamped));
+    if (Math.abs(clamped - value) < 1e-6) return;
+    onCommit(clamped);
+  };
+  commitRef.current = commitRaw;
+
+  useEffect(() => {
+    const el = numInputRef.current;
+    if (!el) return;
+    const onNativeChange = () => commitRef.current(el.value);
+    el.addEventListener('change', onNativeChange);
+    return () => el.removeEventListener('change', onNativeChange);
+  }, []);
+
+  const numericDraft = Number(draft);
+  const sliderValue = Number.isFinite(numericDraft) ? Math.min(max, Math.max(min, numericDraft)) : value;
+
+  return (
+    <div className="overlay-inspector-field">
+      <span className="label">{label}</span>
+      <input
+        type="range"
+        aria-label={`${label} slider`}
+        min={min}
+        max={max}
+        step={step}
+        value={sliderValue}
+        onPointerDown={() => {
+          draggingRef.current = true;
+        }}
+        onChange={(event) => {
+          const next = event.target.value;
+          setDraft(next);
+          if (!draggingRef.current) commitRaw(next);
+        }}
+        onPointerUp={(event) => {
+          if (!draggingRef.current) return;
+          draggingRef.current = false;
+          commitRaw((event.currentTarget as HTMLInputElement).value);
+        }}
+        onPointerCancel={(event) => {
+          if (!draggingRef.current) return;
+          draggingRef.current = false;
+          commitRaw((event.currentTarget as HTMLInputElement).value);
+        }}
+      />
+      <input
+        ref={numInputRef}
+        type="number"
+        className="input"
+        name={name}
+        aria-label={label}
+        min={min}
+        max={max}
+        step={step}
+        value={draft}
+        onChange={(event) => setDraft(event.target.value)}
+        onBlur={(event) => commitRaw(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter') {
+            commitRaw((event.currentTarget as HTMLInputElement).value);
+          }
+        }}
+      />
+    </div>
+  );
+}
+
+function OverlayInspector({
+  store,
+  clip,
+  onClose,
+}: {
+  store: EditorStore;
+  clip: Clip;
+  onClose: () => void;
+}) {
+  const asset = store.project.assets.find((entry) => entry.id === clip.assetId);
+  const x = round3(Math.min(1, Math.max(0, (clip.transform?.x ?? 0) + 0.5)));
+  const y = round3(Math.min(1, Math.max(0, (clip.transform?.y ?? 0) + 0.5)));
+  const scale = round3(Math.min(1, Math.max(0.05, clip.transform?.scale ?? 0.2)));
+  const opacity = round3(Math.min(1, Math.max(0, clip.transform?.opacity ?? 1)));
+
+  return (
+    <div className="overlay-inspector" role="region" aria-label="Overlay inspector">
+      <span className="label">Overlay</span>
+      <span className="chip mono">
+        {asset?.label ?? 'overlay'} · {(clipTimelineDurationMs(clip) / 1000).toFixed(2)}s
+      </span>
+      <OverlaySliderField
+        label="X"
+        name="x"
+        value={x}
+        min={0}
+        max={1}
+        onCommit={(next) => store.apply({ op: 'set_overlay', clipId: clip.id, x: next })}
+      />
+      <OverlaySliderField
+        label="Y"
+        name="y"
+        value={y}
+        min={0}
+        max={1}
+        onCommit={(next) => store.apply({ op: 'set_overlay', clipId: clip.id, y: next })}
+      />
+      <OverlaySliderField
+        label="Scale"
+        name="scale"
+        value={scale}
+        min={0.05}
+        max={1}
+        onCommit={(next) => store.apply({ op: 'set_overlay', clipId: clip.id, scale: next })}
+      />
+      <OverlaySliderField
+        label="Opacity"
+        name="opacity"
+        value={opacity}
+        min={0}
+        max={1}
+        onCommit={(next) => store.apply({ op: 'set_overlay', clipId: clip.id, opacity: next })}
+      />
+      <div style={{ flex: 1 }} />
+      <IconButton
+        icon="trash"
+        title="Delete overlay"
+        onClick={() => {
+          store.apply({ op: 'delete_clip', clipId: clip.id });
+          onClose();
+        }}
+      />
+      <IconButton icon="x" title="Close overlay inspector" onClick={onClose} />
+    </div>
   );
 }
 

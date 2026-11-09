@@ -7,10 +7,12 @@ export function createDemoMedia(dir) {
   const clip1 = resolve(dir, 'roastery-tour.mp4');
   const clip2 = resolve(dir, 'pour-shot.mp4');
   const music = resolve(dir, 'bed.mp3');
+  const logo = resolve(dir, 'northwind-logo.png');
   execFileSync('ffmpeg', ['-y', '-v', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=720x1280:rate=30', '-f', 'lavfi', '-i', 'sine=frequency=420:sample_rate=48000', '-t', '5', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', clip1]);
   execFileSync('ffmpeg', ['-y', '-v', 'error', '-f', 'lavfi', '-i', 'smptebars=size=720x1280:rate=30', '-t', '4', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', clip2]);
   execFileSync('ffmpeg', ['-y', '-v', 'error', '-f', 'lavfi', '-i', 'sine=frequency=220:sample_rate=48000', '-t', '9', '-c:a', 'libmp3lame', music]);
-  return { clip1, clip2, music };
+  execFileSync('ffmpeg', ['-y', '-v', 'error', '-f', 'lavfi', '-i', 'color=c=0x5BE9A6:s=200x200', '-frames:v', '1', logo]);
+  return { clip1, clip2, music, logo };
 }
 
 export function buildDemoProject(media) {
@@ -27,6 +29,7 @@ export function buildDemoProject(media) {
       { id: 'a_tour', kind: 'video', uri: media.clip1, label: 'roastery-tour.mp4', durationMs: 5000, width: 720, height: 1280, hasAudio: true, origin: 'imported' },
       { id: 'a_pour', kind: 'video', uri: media.clip2, label: 'pour-shot.mp4', durationMs: 4000, width: 720, height: 1280, hasAudio: false, origin: 'imported' },
       { id: 'a_bed', kind: 'audio', uri: media.music, label: 'bed.mp3', durationMs: 9000, hasAudio: true, origin: 'imported' },
+      { id: 'a_logo', kind: 'image', uri: media.logo, label: 'northwind-logo.png', durationMs: 5000, width: 200, height: 200, origin: 'imported' },
     ],
     tracks: [
       {
@@ -42,6 +45,22 @@ export function buildDemoProject(media) {
             transitionOut: { id: 'tr_1', type: 'fade', durationMs: 500 },
           },
           { id: 'c_pour', assetId: 'a_pour', inMs: 0, outMs: 3200, effects: [{ id: 'fx_zoom', type: 'kenburns', params: { zoom: 1.12, direction: 'in' } }] },
+        ],
+        items: [],
+      },
+      {
+        id: 'o1',
+        kind: 'overlay',
+        clips: [
+          {
+            id: 'c_logo',
+            assetId: 'a_logo',
+            inMs: 0,
+            outMs: 6400,
+            startMs: 300,
+            transform: { x: 0.38, y: -0.42, scale: 0.16, rotation: 0, opacity: 1 },
+            effects: [],
+          },
         ],
         items: [],
       },
@@ -89,7 +108,7 @@ export function buildDemoProject(media) {
           },
         ],
       },
-      { id: 'a1', kind: 'audio', clips: [{ id: 'c_bed', assetId: 'a_bed', inMs: 0, outMs: 7500, startMs: 0, volume: 0.45, effects: [] }], items: [] },
+      { id: 'a1', kind: 'audio', clips: [{ id: 'c_bed', assetId: 'a_bed', inMs: 0, outMs: 8200, startMs: 0, volume: 0.45, effects: [] }], items: [] },
     ],
   };
 }

@@ -19,9 +19,19 @@ await page.waitForTimeout(1800);
 
 const outPath = resolve(root, '.demo/export.mp4');
 // The save-dialog handler in the main process honours this for automated checks.
-await app.evaluate(({}, target) => {
-  process.env.EDITBAY_TEST_EXPORT = target;
-}, outPath);
+// The main-process inspector context is replaced once during startup; retry
+// until it is stable instead of relying on a fixed delay.
+for (let attempt = 0; ; attempt += 1) {
+  try {
+    await app.evaluate(({}, target) => {
+      process.env.EDITBAY_TEST_EXPORT = target;
+    }, outPath);
+    break;
+  } catch (error) {
+    if (attempt >= 20 || !String(error).includes('Execution context was destroyed')) throw error;
+    await page.waitForTimeout(250);
+  }
+}
 
 await page.getByRole('button', { name: 'Export' }).click();
 await page.getByText('Export complete').waitFor({ timeout: 180_000 });

@@ -222,7 +222,8 @@ a {
 
 .workspace {
   display: grid;
-  grid-template-columns: 56px 1fr 396px;
+  /* minmax(0, …): a wide inspector row must never push the stage column under the side panel. */
+  grid-template-columns: 56px minmax(0, 1fr) 396px;
   min-height: 0;
 }
 
@@ -425,7 +426,7 @@ a {
   border-top: 1px solid var(--line);
   background: var(--bg-elev);
   display: grid;
-  grid-template-rows: 30px auto;
+  grid-template-rows: 30px auto auto;
   min-height: 222px;
   max-height: 360px;
   user-select: none;
@@ -456,10 +457,24 @@ a {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 0 12px;
+  padding: 0 8px 0 12px;
   color: var(--text-faint);
   border-bottom: 1px solid var(--line);
   font-size: 11px;
+}
+
+.track-label-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.track-label .track-toggle {
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
 }
 
 .track-label .dot {
@@ -467,16 +482,26 @@ a {
   height: 6px;
   border-radius: 50%;
   background: var(--text-faint);
+  flex-shrink: 0;
 }
 
 .track-label.video .dot {
   background: var(--accent);
+}
+.track-label.overlay .dot {
+  background: var(--warn);
 }
 .track-label.text .dot {
   background: #7fb2ff;
 }
 .track-label.audio .dot {
   background: #c9a3ff;
+}
+
+.track-label.is-off .dot,
+.track-label.is-off .track-label-name,
+.track-row.is-off {
+  opacity: 0.4;
 }
 
 .timeline-scroll {
@@ -516,6 +541,18 @@ a {
   background-position: 0 0;
 }
 
+.track-empty-hint {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-faint);
+  pointer-events: none;
+}
+
 .clip {
   position: absolute;
   top: 6px;
@@ -553,6 +590,7 @@ a {
   grid-auto-columns: 1fr;
   opacity: 0.45;
   pointer-events: none;
+  z-index: 0;
 }
 
 .clip-filmstrip-frame {
@@ -573,21 +611,18 @@ a {
   fill: #c9a3ff;
   opacity: 0.28;
   pointer-events: none;
-}
-
-.clip-filmstrip ~ .meta {
-  background: rgba(5, 7, 6, 0.78);
-  border: 1px solid rgba(146, 201, 173, 0.16);
-  border-radius: 3px;
-  padding: 2px 6px;
-  margin-left: 5px;
-  align-self: center;
+  z-index: 0;
 }
 
 .clip .meta {
   position: relative;
   z-index: 1;
-  padding: 4px 8px;
+  background: rgba(5, 7, 6, 0.86);
+  border: 1px solid rgba(146, 201, 173, 0.18);
+  border-radius: 3px;
+  padding: 2px 6px;
+  margin-left: 5px;
+  align-self: center;
   min-width: 0;
   display: grid;
   align-content: center;
@@ -597,6 +632,7 @@ a {
 
 .clip .name {
   font-size: 11px;
+  color: var(--text);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -604,8 +640,8 @@ a {
 
 .clip .dur {
   font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--text-faint);
+  font-size: 10px;
+  color: var(--text-dim);
 }
 
 .clip.text-clip {
@@ -613,9 +649,95 @@ a {
   border-color: rgba(127, 178, 255, 0.24);
 }
 
+.clip.overlay-clip {
+  background: #1a1710;
+  border-color: rgba(230, 196, 119, 0.28);
+}
+
 .clip.audio-clip {
   background: #161120;
   border-color: rgba(201, 163, 255, 0.22);
+}
+
+.clip-overflow {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background-color: rgba(5, 7, 6, 0.62);
+  background-image: repeating-linear-gradient(
+    -45deg,
+    rgba(227, 236, 230, 0.18) 0px,
+    rgba(227, 236, 230, 0.18) 3px,
+    transparent 3px,
+    transparent 8px
+  );
+  border-left: 1px dashed rgba(230, 196, 119, 0.55);
+  pointer-events: none;
+  z-index: 2;
+}
+
+.project-end-line {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--warn);
+  opacity: 0.78;
+  pointer-events: none;
+  z-index: 4;
+}
+
+.project-end-tag {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  padding: 1px 4px;
+  border-radius: 2px;
+  background: rgba(5, 7, 6, 0.88);
+  border: 1px solid rgba(230, 196, 119, 0.45);
+  color: var(--warn);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  line-height: 1.2;
+}
+
+.overlay-inspector {
+  display: flex;
+  flex-wrap: wrap;
+  min-width: 0;
+  align-items: center;
+  gap: 12px;
+  padding: 4px 12px;
+  min-height: 36px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+  font-size: 11px;
+}
+
+.overlay-inspector-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.overlay-inspector-field .label {
+  font-size: 11px;
+  letter-spacing: 0.08em;
+}
+
+.overlay-inspector-field input[type='range'] {
+  width: 72px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.overlay-inspector-field .input {
+  width: 58px;
+  height: 24px;
+  padding: 0 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
 }
 
 .clip .handle {

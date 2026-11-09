@@ -10,7 +10,9 @@ import {
   activeAudioClipsAt,
   activeClipAt,
   activeClipsAt,
+  activeOverlayClipsAt,
   sourceTimeMs,
+  textItemsAt,
   textLineX,
   textPlacement,
   videoClips,
@@ -101,6 +103,50 @@ describe('compositor timeline math', () => {
 
     expect(activeAudioClipsAt(project, 500)).toHaveLength(0);
     expect(activeAudioClipsAt(project, 1500)).toHaveLength(1);
+
+    const muted = mustApply(project, { op: 'set_track', trackId: audioTrack!.id, muted: true });
+    expect(activeAudioClipsAt(muted, 1500)).toHaveLength(0);
+  });
+
+  it('respects hidden on video, overlay and text tracks', () => {
+    let project = projectWithTransition();
+    project = mustApply(project, {
+      op: 'add_asset',
+      asset: { id: 'a_logo', kind: 'image', uri: '/media/logo.png', label: 'logo.png', durationMs: 5000 },
+    });
+    project = mustApply(project, {
+      op: 'add_overlay',
+      assetId: 'a_logo',
+      startMs: 0,
+      durationMs: 2000,
+      x: 0.88,
+      y: 0.08,
+      scale: 0.16,
+    });
+    project = mustApply(project, {
+      op: 'add_text',
+      text: 'Caption',
+      startMs: 0,
+      durationMs: 2000,
+    });
+
+    const videoTrackId = project.tracks.find((t) => t.kind === 'video')!.id;
+    const overlayTrackId = project.tracks.find((t) => t.kind === 'overlay')!.id;
+    const textTrackId = project.tracks.find((t) => t.kind === 'text')!.id;
+
+    expect(videoClips(project)).toHaveLength(2);
+    expect(activeOverlayClipsAt(project, 500)).toHaveLength(1);
+    expect(textItemsAt(project, 500)).toHaveLength(1);
+
+    const hiddenAll = [
+      { op: 'set_track' as const, trackId: videoTrackId, hidden: true },
+      { op: 'set_track' as const, trackId: overlayTrackId, hidden: true },
+      { op: 'set_track' as const, trackId: textTrackId, hidden: true },
+    ].reduce(mustApply, project);
+
+    expect(videoClips(hiddenAll)).toHaveLength(0);
+    expect(activeOverlayClipsAt(hiddenAll, 500)).toHaveLength(0);
+    expect(textItemsAt(hiddenAll, 500)).toHaveLength(0);
   });
 });
 

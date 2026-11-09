@@ -29,6 +29,7 @@ All times are integer milliseconds. Every command returns `{ ok, project, change
 | `remove_transition` | `clipId` | Remove. |
 | `set_canvas` | `width`, `height`, `fps?` | Output format. |
 | `set_project_name` | `name` | Rename. |
+| `set_track` | `trackId`, `muted?`, `hidden?` | Mute audio/video tracks or hide video/overlay/text tracks. |
 
 Agent-only replies: `{ "op": "clarify", "question": "…" }` and `{ "op": "unsupported", "reason": "…" }`.
 

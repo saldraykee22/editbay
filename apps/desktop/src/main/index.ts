@@ -299,15 +299,36 @@ function fakeChatResponse(req: ChatRequestDTO): ChatResponseDTO {
   };
 }
 
+function authorizeBrandLogoFromContent(content: string): void {
+  for (const line of content.split(/\r?\n/)) {
+    const match = /^\s*(?:logoPath|logo)\s*:\s*(.+)$/.exec(line);
+    if (!match) continue;
+    const raw = (match[1] ?? '').trim();
+    const unquoted = raw.startsWith('"') && raw.endsWith('"') ? raw.slice(1, -1).replace(/\\\\/g, '\\') : raw.replace(/^'|'$/g, '');
+    if (looksLikeMediaPath(unquoted)) authorizeMedia([unquoted]);
+  }
+}
+
 function authorizeWorkspaceRecoveryAssets(): void {
   try {
     const file = join(workspaceRoot(), 'projects', 'current.json');
-    if (!existsSync(file)) return;
-    const parsed = JSON.parse(readFileSync(file, 'utf8')) as { assets?: Array<{ uri?: unknown }> };
-    const uris = (parsed.assets ?? [])
-      .map((asset) => (typeof asset?.uri === 'string' ? asset.uri : null))
-      .filter((uri): uri is string => uri !== null);
-    if (uris.length > 0) authorizeMedia(uris);
+    if (existsSync(file)) {
+      const parsed = JSON.parse(readFileSync(file, 'utf8')) as { assets?: Array<{ uri?: unknown }> };
+      const uris = (parsed.assets ?? [])
+        .map((asset) => (typeof asset?.uri === 'string' ? asset.uri : null))
+        .filter((uri): uri is string => uri !== null);
+      if (uris.length > 0) authorizeMedia(uris);
+    }
+    const brandsDir = join(workspaceRoot(), 'brands');
+    if (existsSync(brandsDir)) {
+      for (const entry of readdirSync(brandsDir, { withFileTypes: true })) {
+        if (!entry.isDirectory()) continue;
+        const identityFile = join(brandsDir, entry.name, 'identity.md');
+        if (existsSync(identityFile)) {
+          authorizeBrandLogoFromContent(readFileSync(identityFile, 'utf8'));
+        }
+      }
+    }
   } catch {
     // A corrupt recovery file is handled by the renderer; it must not block startup.
   }
@@ -389,6 +410,11 @@ function registerIpc(): void {
   });
 
   ipcMain.handle('media:pickLogo', async (): Promise<string | null> => {
+    if (process.env['EDITBAY_TEST_LOGO']) {
+      const testLogo = process.env['EDITBAY_TEST_LOGO'];
+      authorizeMedia([testLogo]);
+      return testLogo;
+    }
     const result = await dialog.showOpenDialog({
       title: 'Choose logo',
       properties: ['openFile'],
