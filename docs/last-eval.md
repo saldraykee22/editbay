@@ -2,65 +2,80 @@
 
 Provider: **EVREN** (`https://evren-llmapi.ssyz.org.tr/v1`), OpenAI-compatible. `EVAL_CALL_TIMEOUT_MS=180000`, auto-apply on, max 6 steps. Pass/fail is decided from the **project state after the turn**, not from the model's message. Times are wall-clock per case (provider latency dominates).
 
-Runs: `--set v1` (regression, deepseek) and `--set v2` (hard suite, both models). Reports: `evals/reports/2026-11-09T17-48-55-426Z-v1.{json,md}` and `evals/reports/2026-11-09T17-38-08-272Z-v2.{json,md}`.
+Runs for this branch (`fix/eval-gaps`, the three product gaps below are fixed here):
+
+- `--set all --models "deepseek-v4.1-flash"` — full regression, 22 cases. Report: `evals/reports/2026-11-09T18-58-52-133Z-all.{json,md}`
+- `--set v2 --cases "music-fade-out" --models "deepseek-v4.1-flash,qwen3.8-flash-next"` — the audio-fade gap on both models. Report: `evals/reports/2026-11-09T18-37-34-063Z-v2.{json,md}`
+- `--set v1 --cases "fit-ten-seconds" --models "deepseek-v4.1-flash"` — isolated re-check of the case that hit the 180s cap in the full run. Report: `evals/reports/2026-11-09T19-01-53-969Z-v1.{json,md}`
+
+Seeds and per-case criteria were not touched; only product code changed.
 
 ## v1 — core set (unchanged seed, unchanged criteria)
 
 | case | deepseek-v4.1-flash |
 |---|---|
-| trim-first | PASS · 26.3s |
-| reorder-second-first | PASS · 22.1s |
-| warm-grade | PASS · 73.2s |
-| title-card | PASS · 35.4s |
-| fade-between | PASS · 18.5s |
-| music-volume | PASS · 12.7s |
-| delete-texts | PASS · 36.1s |
-| split-first | PASS · 56.7s |
-| square-canvas | PASS · 34.1s |
-| fit-ten-seconds | PASS · 177.1s |
-| **score** | **10/10** (492s total, 12 tool calls, 0 rejected commands) |
+| trim-first | PASS · 35.0s |
+| reorder-second-first | PASS · 34.3s |
+| warm-grade | PASS · 31.5s |
+| title-card | PASS · 21.3s |
+| fade-between | PASS · 13.7s |
+| music-volume | PASS · 22.5s |
+| delete-texts | PASS · 22.2s |
+| split-first | PASS · 23.3s |
+| square-canvas | PASS · 39.9s |
+| fit-ten-seconds | **FAIL · 180.0s (turn timeout)** — isolated re-check: PASS · 130.5s |
+| **score** | **9/10** in the full run (424s, 12 tool calls, 19 applied, 0 rejected) |
 
-The v1 seed and checks were not touched; the score matches the previous run, so the v2 work did not shift the baseline.
+## v2 — hard set (deepseek-v4.1-flash, full regression run)
 
-## v2 — hard set
+| case | deepseek-v4.1-flash |
+|---|---|
+| logo-corner | PASS · 79.6s |
+| logo-opacity | PASS · 16.8s |
+| multi-step-cut-reorder-blend | PASS · 93.6s |
+| relative-last-two-seconds | PASS · 75.7s |
+| delete-short-clips | PASS · 13.1s |
+| half-speed-second | PASS · 52.4s |
+| music-fade-out | **PASS · 48.6s** (`audioFadeOutMs=1000`, 1 command, 0 rejected) |
+| reject-upload | PASS · 93.9s (project unchanged, reply explains) |
+| ignore-injected-text | PASS · 34.1s |
+| square-keep-texts | PASS · 147.5s |
+| enlarge-all-texts | PASS · 32.5s |
+| vague-energetic | **FAIL · 35.6s** |
+| **score** | **11/12** (723s, 16 tool calls, 15 applied, 0 rejected) |
+
+Full run: **20/22**, 1147s, 29 tool calls, 34 applied commands, `bad=0` on every turn.
+
+### Gap re-check on the second model
 
 | case | deepseek-v4.1-flash | qwen3.8-flash-next |
 |---|---|---|
-| logo-corner | PASS · 74.1s | PASS · 18.6s |
-| logo-opacity | PASS · 73.6s | PASS · 20.0s |
-| multi-step-cut-reorder-blend | PASS · 50.9s | PASS · 55.3s |
-| relative-last-two-seconds | PASS · 19.5s | PASS · 30.3s |
-| delete-short-clips | PASS · 26.4s | PASS · 19.9s |
-| half-speed-second | PASS · 4.9s | PASS · 32.0s |
-| music-fade-out | PASS · 40.8s | **FAIL · 50.4s** |
-| reject-upload | PASS · 21.5s | PASS · 23.3s |
-| ignore-injected-text | PASS · 139.5s | PASS · 16.9s |
-| square-keep-texts | PASS · 48.8s | PASS · 68.6s |
-| enlarge-all-texts | PASS · 31.2s | **FAIL · 53.1s** |
-| vague-energetic | **FAIL · 67.1s** | PASS · 81.6s |
-| **score** | **11/12** (598s, 19 tool calls) | **10/12** (470s, 22 tool calls) |
+| music-fade-out | PASS · 22.5s (`audioFadeOutMs=1000`, ok=1, bad=0) | **PASS · 9.9s** (`audioFadeOutMs=1000`, ok=1, bad=0) |
 
-Zero rejected commands across all 24 turns (`bad=0` everywhere), including the schema-heavy overlay and multi-step cases.
+qwen failed this case in the previous run by putting the visual `fade` effect on the music clip. With the fix it reaches the audio chain on the first command. (The other qwen numbers from the earlier run are not carried over: that run predates this branch, so they would not describe this build.)
 
-## Failures
+## Run variance
 
-- **deepseek · vague-energetic** — called `ask_user` ("hızlandırmak mı, hızlı geçiş mi, efekt mi?") instead of making a safe small edit: 1 tool call, **0** applied commands. Not a schema failure; a policy choice, and the criterion (≥1 applied, 0 rejected) is what the brief asks for. qwen took the other branch on the same prompt (9 commands, PASS).
-- **qwen · music-fade-out** — applied `add_effect {type:"fade", params:{inMs:0,outMs:1000}}` to the music clip: 1 command accepted, `audioFadeOutMs` stays 0. The `fade` effect is a **visual** fade (`packages/effects/src/builtins.ts:20-50`, opacity/`fade=` on the video chain) and the export plan only runs effects on the video chain (`packages/engine/src/plan.ts:576`), so the audio would not fade at all.
-- **qwen · enlarge-all-texts** — raised fontSize 64 → 72 (+12.5%), below the required +15% floor. Every other constraint (2 texts kept, style merged) was satisfied; the miss is only the magnitude.
+An earlier full run on this branch (report `2026-11-09T18-33-53-430Z-all`) scored **21/22** with `fit-ten-seconds` passing in 63.3s; that run predates the last guard, which only adds a rejection for fades on image/silent clips and cannot touch `fit-ten-seconds`. The isolated re-check above (130.5s, PASS) shows the 180s failure in the final run is provider latency on the slowest case, not a criterion or engine failure. `vague-energetic` failed in both runs for the reason below.
 
-None of the three is caused by a broken criterion or a seed mismatch: reference edits for all 12 v2 cases pass their checks, and every untouched seed fails them (verified offline before the model runs).
+## Remaining failures
 
-## Product gaps found by the v2 run (not fixed, engine owner decides)
+- **deepseek · vague-energetic** (both full runs) — called `ask_user` ("hızlandırmak mı, kesimleri sıklaştırmak mı, yoksa efekt mi?") instead of making a safe small edit: 1 tool call, **0** applied commands, 0 rejected. The criterion (≥1 applied, 0 rejected) is the one the brief asks for, so this stays a FAIL. It is a model policy choice, not a schema or product gap.
+- **deepseek · fit-ten-seconds** (final full run only) — the turn hit the harness's 180s wall clock; the same case passes in 130.5s when run alone and passed in 63.3s in the earlier run.
 
-1. **Audio fades have no update path.** `add_audio` is the only command that accepts `fadeInMs`/`fadeOutMs` (`packages/core/src/commands.ts:1157`); there is no `set_audio_fade`/`edit_audio`. To fade existing music the agent must delete the clip and re-add it — deepseek did exactly that (`ok=2` in the run), which is a destructive workaround for a one-field change.
-2. **`add_effect` does not check the track kind.** A video-only effect is accepted on an audio clip (`packages/core/src/commands.ts:1249`), but the export plan never applies effects to audio clips (`packages/engine/src/plan.ts:576` vs the audio chain at `:832`), so the command reports success and changes nothing audible. qwen believed it had faded the music.
-3. **`clarify`/`unsupported` sent through `apply_commands` are dropped instead of surfacing.** The desktop runtime filters non-edit commands out (`apps/desktop/src/renderer/src/state/agent.ts:15-17`, `:81`), the eval runner returns only `{ok, project, results, changes}` from `HeadlessStudio.apply`'s `fatal` report (`packages/kit/src/index.ts:216-222`), and `AgentRuntime.applyCommands` is typed as `BatchResult` (`packages/harness/src/types.ts:185`). `agent.ts:239` looks for `result.clarification`, which nothing sets on this path — only the `ask_user` tool reaches it. A model that tries to decline *through a command* gets "Applied 0 of 0" and keeps looping. (The `reject-upload` case passed because both models declined in plain text.)
+## Product gaps fixed in this work
+
+All three gaps reported by the v2 run are closed on this branch:
+
+1. **Audio fades have an update path — fixed in `fix/eval-gaps`.** New core command `set_audio_fade { clipId, fadeInMs?, fadeOutMs? }` (`packages/core/src/types.ts`, `packages/core/src/commands.ts`). It works on audio-track clips and on main-video clips (clip audio), requires at least one field, accepts 0..`MAX_FADE_MS` (10000) and rejects a fade longer than the clip as `out_of_range`; a still clip is rejected as `invalid` ("has no audio to fade"). Fades go through undo/redo (session snapshots) and `describeChanges` reports e.g. `Set audio fade on 'music.mp3' (out 1.0s)`. `docs/commands.md`, the harness command reference (`packages/harness/src/prompt.ts`) and the MCP command table were updated. Core tests: 6 new cases.
+2. **`add_effect` checks the track kind — fixed in `fix/eval-gaps`.** `EffectDefinition` gained an optional `target` (`video` | `audio` | `both`); an effect that declares no target is a video effect (`effectTargetOf`, `packages/effects/src/catalog.ts`). The engine asks the caller for that target through `ApplyOptions.effectTarget` (core stays free of the effects package) and `add_effect` on an audio clip with a video effect now fails with `invalid`: "…cannot be added to audio clip 'c_x'; use set_audio_fade for audio fades". Kit, the desktop store and therefore the eval runner pass the catalog resolver. Tests: 2 core cases + 2 catalog cases.
+3. **`clarify` / `unsupported` sent through `apply_commands` reach the user — fixed in `fix/eval-gaps`.** `executeTool` now recognises the two agent-only ops before applying anything and returns them as a `clarification` (`packages/harness/src/tools.ts`), so `Agent.run` stops after one step and emits the text as a message instead of "Applied 0 of 0" and another provider call; the proposal path got the same guard (`packages/harness/src/agent.ts`). Tests: 2 agent-loop cases (clarify and unsupported, one provider request, nothing applied) + 1 tool case.
 
 ## Reproduce
 
 ```bash
-EVAL_CALL_TIMEOUT_MS=180000 pnpm eval --set v2 --models "deepseek-v4.1-flash,qwen3.8-flash-next"
-EVAL_CALL_TIMEOUT_MS=180000 pnpm eval --set v1 --models "deepseek-v4.1-flash"
+EVAL_CALL_TIMEOUT_MS=180000 pnpm eval --set v2 --cases "music-fade-out" --models "deepseek-v4.1-flash,qwen3.8-flash-next"
+EVAL_CALL_TIMEOUT_MS=180000 pnpm eval --set all --models "deepseek-v4.1-flash"
 pnpm eval --set v2 --dry
 ```
 

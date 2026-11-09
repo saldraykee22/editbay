@@ -45,6 +45,7 @@ milliseconds; \`inMs\`/\`outMs\` are source points, \`startMs\` is timeline plac
 | duplicate_clip | clipId | |
 | set_volume | clipId, volume | 0..2 |
 | set_audio_start | clipId, startMs | audio tracks |
+| set_audio_fade | clipId, fadeInMs/fadeOutMs | clip audio on audio and main video clips; 0..10000 ms, never longer than the clip |
 | set_clip_speed | clipId, speed | 0.25..4 |
 | set_clip_transform | clipId, transform | x, y, scale, rotation, opacity |
 | add_overlay | assetId, startMs, durationMs, x, y, scale | logo / PiP; x,y are 0..1 canvas coordinates, scale is a fraction of canvas width |
@@ -53,7 +54,7 @@ milliseconds; \`inMs\`/\`outMs\` are source points, \`startMs\` is timeline plac
 | edit_text | itemId | text/startMs/durationMs/style |
 | delete_text | itemId | |
 | add_audio | assetId | optional trackId, inMs, outMs, volume, startMs |
-| add_effect | clipId, effect | effect.type from \`list_effects\` |
+| add_effect | clipId, effect | effect.type from \`list_effects\`; video effects only, audio fades use set_audio_fade |
 | remove_effect | clipId, effectId | |
 | add_transition | clipId, transition | transition.type from \`list_effects\` |
 | remove_transition | clipId | |

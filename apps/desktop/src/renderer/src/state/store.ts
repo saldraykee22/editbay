@@ -9,6 +9,7 @@ import {
   type BatchResult,
   type Project,
 } from '@editbay/core';
+import { effectTargetOf } from '@editbay/effects';
 import type { PickedMedia } from '../../../shared/api';
 
 export interface Selection {
@@ -43,7 +44,7 @@ export class EditorStore {
   private revision = 0;
 
   constructor(project?: Project) {
-    this.session = new EditSession(project);
+    this.session = new EditSession(project, { effectTarget: effectTargetOf });
     this.session.subscribe(() => this.projectChanged());
   }
 
@@ -161,7 +162,7 @@ export class EditorStore {
 
   load(project: Project, path: string | null = null): void {
     this.brandId = project.brandId ?? null;
-    this.session = new EditSession(project);
+    this.session = new EditSession(project, { effectTarget: effectTargetOf });
     this.session.subscribe(() => this.projectChanged());
     this.projectPath = path;
     this.selection = {};

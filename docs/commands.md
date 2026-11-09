@@ -15,6 +15,7 @@ All times are integer milliseconds. Every command returns `{ ok, project, change
 | `delete_clip` | `clipId` | Remove. |
 | `set_volume` | `clipId`, `volume` | 0–2, clip's own audio. |
 | `set_audio_start` | `clipId`, `startMs` | Audio/overlay clips only. |
+| `set_audio_fade` | `clipId`, `fadeInMs?` / `fadeOutMs?` | Clip's own audio: audio clips and main-video clips. 0–10000 ms and never longer than the clip; at least one field is required. |
 | `set_clip_speed` | `clipId`, `speed` | 0.25–4. |
 | `set_clip_transform` | `clipId`, `transform` | x, y, scale, rotation, opacity. |
 | `add_overlay` | `assetId`, `startMs`, `durationMs`, `x`, `y`, `scale`, `opacity?` | Logo / product shot / PiP on the overlay track. `x`,`y` are normalized 0..1 canvas coordinates (the overlay is centred on that point), `scale` is a fraction of the canvas width (0.05–1). Images have no source-duration limit; a video overlay cannot run past its asset. |
@@ -23,7 +24,7 @@ All times are integer milliseconds. Every command returns `{ ok, project, change
 | `edit_text` | `itemId`, … | Partial update. |
 | `delete_text` | `itemId` | Remove. |
 | `add_audio` | `assetId`, `startMs?`, `volume?`, fades | Music / voice-over. |
-| `add_effect` | `clipId`, `effect` | Windowed parametric effect. |
+| `add_effect` | `clipId`, `effect` | Windowed parametric effect. Video effects only; on an audio clip the command is rejected — use `set_audio_fade`. |
 | `remove_effect` | `clipId`, `effectId` | Remove. |
 | `add_transition` | `clipId`, `transition` | Transition into the next clip. |
 | `remove_transition` | `clipId` | Remove. |

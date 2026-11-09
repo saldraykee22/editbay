@@ -765,6 +765,117 @@ describe('add_audio', () => {
   });
 });
 
+describe('set_audio_fade', () => {
+  function projectWithAudio(): { project: Project; clipId: string } {
+    const added = applyOk(baseProject(), { op: 'add_audio', assetId: MUSIC.id });
+    return { project: added.project, clipId: added.createdIds.clip ?? '' };
+  }
+
+  it('sets the fade-out on an audio clip and reports it in the change summary', () => {
+    const { project, clipId } = projectWithAudio();
+    const result = applyOk(project, { op: 'set_audio_fade', clipId, fadeOutMs: 1000 });
+    expect(findClip(result.project, clipId)?.clip.audioFadeOutMs).toBe(1000);
+    expect(result.changes).toContain("Set audio fade on 'music.mp3' (out 1.0s)");
+  });
+
+  it('keeps an omitted fade field unchanged', () => {
+    const { project, clipId } = projectWithAudio();
+    const faded = applyOk(project, {
+      op: 'set_audio_fade',
+      clipId,
+      fadeInMs: 500,
+      fadeOutMs: 1200,
+    });
+    const updated = applyOk(faded.project, { op: 'set_audio_fade', clipId, fadeInMs: 0 });
+    const clip = findClip(updated.project, clipId)?.clip;
+    expect(clip?.audioFadeInMs).toBe(0);
+    expect(clip?.audioFadeOutMs).toBe(1200);
+    expect(updated.changes).toEqual(["Set audio fade on 'music.mp3' (out 1.2s)"]);
+  });
+
+  it('works on a main video clip (clip audio)', () => {
+    const { project, clipId } = projectWithClip();
+    const result = applyOk(project, {
+      op: 'set_audio_fade',
+      clipId,
+      fadeInMs: 400,
+      fadeOutMs: 800,
+    });
+    const clip = findClip(result.project, clipId)?.clip;
+    expect(clip?.audioFadeInMs).toBe(400);
+    expect(clip?.audioFadeOutMs).toBe(800);
+  });
+
+  it('rejects empty, too-long and above-maximum fades', () => {
+    const { project, clipId } = projectWithAudio();
+
+    const empty = applyCommand(project, { op: 'set_audio_fade', clipId });
+    expect(empty.ok).toBe(false);
+    if (!empty.ok) expect(empty.error.code).toBe('invalid');
+
+    const tooLong = applyCommand(project, { op: 'set_audio_fade', clipId, fadeOutMs: 9000 });
+    expect(tooLong.ok).toBe(false);
+    if (!tooLong.ok) {
+      expect(tooLong.error.code).toBe('out_of_range');
+      expect(tooLong.error.message).toContain('8000ms');
+    }
+
+    const aboveMax = applyCommand(project, { op: 'set_audio_fade', clipId, fadeInMs: 11_000 });
+    expect(aboveMax.ok).toBe(false);
+    if (!aboveMax.ok) expect(aboveMax.error.code).toBe('out_of_range');
+  });
+
+  it('rejects overlay clips and unknown clip ids', () => {
+    const overlay = applyOk(baseProject(), {
+      op: 'add_overlay',
+      assetId: IMAGE.id,
+      startMs: 0,
+      durationMs: 1000,
+      x: 0.5,
+      y: 0.5,
+      scale: 0.3,
+    });
+    const rejected = applyCommand(overlay.project, {
+      op: 'set_audio_fade',
+      clipId: overlay.createdIds.clip ?? '',
+      fadeOutMs: 500,
+    });
+    expect(rejected.ok).toBe(false);
+    if (!rejected.ok) expect(rejected.error.code).toBe('invalid');
+
+    const missing = applyCommand(baseProject(), {
+      op: 'set_audio_fade',
+      clipId: 'c_missing',
+      fadeOutMs: 500,
+    });
+    expect(missing.ok).toBe(false);
+    if (!missing.ok) expect(missing.error.code).toBe('not_found');
+
+    const still = applyOk(baseProject(), { op: 'import_clip', assetId: IMAGE.id });
+    const silent = applyCommand(still.project, {
+      op: 'set_audio_fade',
+      clipId: still.createdIds.clip ?? '',
+      fadeOutMs: 500,
+    });
+    expect(silent.ok).toBe(false);
+    if (!silent.ok) expect(silent.error.message).toContain('has no audio');
+  });
+
+  it('round-trips through undo and redo in the session', () => {
+    const session = new EditSession(baseProject());
+    const added = session.apply({ op: 'add_audio', assetId: MUSIC.id });
+    expect(added.ok).toBe(true);
+    const clipId = added.ok ? added.createdIds.clip ?? '' : '';
+    const fade = session.apply({ op: 'set_audio_fade', clipId, fadeOutMs: 1500 });
+    expect(fade.ok).toBe(true);
+    expect(findClip(session.project, clipId)?.clip.audioFadeOutMs).toBe(1500);
+    expect(session.undo()).toBe(true);
+    expect(findClip(session.project, clipId)?.clip.audioFadeOutMs).toBe(0);
+    expect(session.redo()).toBe(true);
+    expect(findClip(session.project, clipId)?.clip.audioFadeOutMs).toBe(1500);
+  });
+});
+
 describe('effects and transitions', () => {
   it('adds an effect with a window inside the clip', () => {
     const { project, clipId } = projectWithClip();
@@ -788,6 +899,55 @@ describe('effects and transitions', () => {
     });
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error.code).toBe('out_of_range');
+  });
+
+  it('rejects a video effect on an audio clip and points at set_audio_fade', () => {
+    const added = applyOk(baseProject(), { op: 'add_audio', assetId: MUSIC.id });
+    const audioClipId = added.createdIds.clip ?? '';
+    const fade = {
+      op: 'add_effect',
+      clipId: audioClipId,
+      effect: { type: 'fade', params: { outMs: 1000 } },
+    } as const;
+
+    // A declared video target and the default (no declared target) both reject.
+    for (const options of [undefined, { effectTarget: () => 'video' as const }]) {
+      const result = applyCommand(added.project, fade, options);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.code).toBe('invalid');
+        expect(result.error.message).toContain('cannot be added to audio clip');
+        expect(result.error.message).toContain('use set_audio_fade for audio fades');
+      }
+    }
+    expect(findClip(added.project, audioClipId)?.clip.effects).toHaveLength(0);
+  });
+
+  it('accepts audio-targeted effects on audio clips and video effects on video clips', () => {
+    const added = applyOk(baseProject(), { op: 'add_audio', assetId: MUSIC.id });
+    const audioClipId = added.createdIds.clip ?? '';
+    const onAudio = applyCommand(
+      added.project,
+      { op: 'add_effect', clipId: audioClipId, effect: { type: 'duck' } },
+      { effectTarget: () => 'audio' },
+    );
+    expect(onAudio.ok).toBe(true);
+
+    const { project, clipId } = projectWithClip();
+    const onVideo = applyCommand(
+      project,
+      { op: 'add_effect', clipId, effect: { type: 'duck' } },
+      { effectTarget: () => 'both' },
+    );
+    expect(onVideo.ok).toBe(true);
+
+    const audioOnlyOnVideo = applyCommand(
+      project,
+      { op: 'add_effect', clipId, effect: { type: 'duck' } },
+      { effectTarget: () => 'audio' },
+    );
+    expect(audioOnlyOnVideo.ok).toBe(false);
+    if (!audioOnlyOnVideo.ok) expect(audioOnlyOnVideo.error.code).toBe('invalid');
   });
 
   it('reports not_found when removing a missing effect', () => {

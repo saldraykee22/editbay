@@ -341,6 +341,65 @@ describe('Agent', () => {
     expect(events.at(-1)).toEqual({ type: 'done', text: 'Which clip?' });
   });
 
+  it('surfaces a clarify sent through apply_commands and stops the loop', async () => {
+    const harness = await makeHarness(
+      [
+        {
+          text: '',
+          toolCalls: [
+            {
+              id: 'call_clarify',
+              name: 'apply_commands',
+              arguments: { commands: [{ op: 'clarify', question: 'Which music track?' }] },
+            },
+          ],
+        },
+      ],
+      true,
+    );
+    const agent = new Agent({ runtime: harness.runtime, provider: harness.provider });
+
+    const events = await collect(agent, 'fade the music');
+
+    expect(harness.provider.requests).toHaveLength(1);
+    expect(harness.applied).toHaveLength(0);
+    expect(events.find((event) => event.type === 'message')).toMatchObject({
+      type: 'message',
+      text: 'Which music track?',
+    });
+    expect(events.at(-1)).toEqual({ type: 'done', text: 'Which music track?' });
+  });
+
+  it('surfaces an unsupported reply sent through apply_commands', async () => {
+    const harness = await makeHarness(
+      [
+        {
+          text: '',
+          toolCalls: [
+            {
+              id: 'call_unsupported',
+              name: 'apply_commands',
+              arguments: {
+                commands: [{ op: 'unsupported', reason: 'Uploading to YouTube is not something the editor can do.' }],
+              },
+            },
+          ],
+        },
+      ],
+      true,
+    );
+    const agent = new Agent({ runtime: harness.runtime, provider: harness.provider });
+
+    const events = await collect(agent, 'upload this to YouTube');
+
+    expect(harness.provider.requests).toHaveLength(1);
+    expect(harness.applied).toHaveLength(0);
+    expect(events.find((event) => event.type === 'message')).toMatchObject({
+      type: 'message',
+      text: 'Uploading to YouTube is not something the editor can do.',
+    });
+  });
+
   it('converts an apply_commands tool call into a proposal when autoApply is off', async () => {
     const harness = await makeHarness(
       [

@@ -1,6 +1,6 @@
-import type { EffectParam } from '@editbay/core';
+import type { EffectParam, EffectTarget } from '@editbay/core';
 
-export type { EffectParam };
+export type { EffectParam, EffectTarget };
 
 export type EffectCategory = 'motion' | 'color' | 'texture' | 'audio';
 
@@ -64,6 +64,11 @@ export interface EffectDefinition {
   description: string;
   params: EffectParamSpec[];
   builtin: boolean;
+  /**
+   * Track kinds the effect may be attached to. Omitted means a video effect
+   * (the picture chain); audio is faded with `set_audio_fade` in core.
+   */
+  target?: EffectTarget;
   /** Preview styling. Must be pure and cheap (runs per frame). */
   style?: (ctx: EffectRenderContext) => FrameStyle;
   /**

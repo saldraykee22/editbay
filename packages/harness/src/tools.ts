@@ -254,6 +254,28 @@ function applyCommands(
     commands.push(record as unknown as AgentCommand);
   }
 
+  // `clarify` / `unsupported` are replies, not edits. They must reach the user
+  // instead of being filtered out as "Applied 0 of 0" and looping the model.
+  const reply = commands.find(
+    (command) => command.op === 'clarify' || command.op === 'unsupported',
+  );
+  if (reply) {
+    const text = reply.op === 'clarify' ? reply.question : reply.reason;
+    if (typeof text !== 'string' || text.trim() === '') {
+      return failure(
+        `apply_commands: "${reply.op}" needs a non-empty ${
+          reply.op === 'clarify' ? 'question' : 'reason'
+        }`,
+      );
+    }
+    return {
+      ok: true,
+      summary: text,
+      data: { ok: true, reply: { op: reply.op, text }, results: [], skipped: 0 },
+      clarification: text,
+    };
+  }
+
   const batch: BatchResult = runtime.applyCommands(commands);
   const perCommand = batch.results.map((result) =>
     result.ok

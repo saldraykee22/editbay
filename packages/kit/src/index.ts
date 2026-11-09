@@ -27,7 +27,7 @@ import {
   type ExportQuality,
   type ProbeResult,
 } from '@editbay/engine';
-import { effectCatalog } from '@editbay/effects';
+import { effectCatalog, effectTargetOf } from '@editbay/effects';
 import {
   FileMemoryStore,
   FileSkillStore,
@@ -136,9 +136,11 @@ export class HeadlessStudio {
     let session: EditSession;
     if (existsSync(projectPath)) {
       const raw = await fs.readFile(projectPath, 'utf8');
-      session = EditSession.fromJSON(raw);
+      session = EditSession.fromJSON(raw, { effectTarget: effectTargetOf });
     } else {
-      session = new EditSession(createEmptyProject(options.name ?? 'Untitled'));
+      session = new EditSession(createEmptyProject(options.name ?? 'Untitled'), {
+        effectTarget: effectTargetOf,
+      });
     }
 
     const studio = new HeadlessStudio({ projectPath, workspaceRoot, session, builtinSkillsDir: options.builtinSkillsDir });
