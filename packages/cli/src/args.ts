@@ -34,6 +34,7 @@ export interface CliOptions {
   limit?: string;
   description?: string;
   triggers?: string;
+  offset?: string;
   /** Raw JSON command payload for `apply --json`. */
   payload?: string;
 }
@@ -67,6 +68,9 @@ const COMMAND_OPTIONS: Record<string, Record<string, OptionSpec>> = {
   export: {
     quality: { type: 'string' },
     quiet: { type: 'boolean' },
+  },
+  captions: {
+    offset: { type: 'string' },
   },
   skills: {
     name: { type: 'string' },
@@ -161,6 +165,8 @@ export function parseCliArgs(argv: string[]): CliOptions {
   if (description !== undefined) options.description = description;
   const triggers = readString(values.triggers);
   if (triggers !== undefined) options.triggers = triggers;
+  const offset = readString(values.offset);
+  if (offset !== undefined) options.offset = offset;
   if (isApply) {
     const payload = readString(values.json);
     if (payload !== undefined) options.payload = payload;

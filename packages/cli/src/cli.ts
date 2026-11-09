@@ -15,6 +15,7 @@ import { runEffects } from './commands/effects';
 import { runExport } from './commands/export';
 import { runBrands, runMemory, runSkills } from './commands/knowledge';
 import { runImport, runProbe } from './commands/media';
+import { runCaptions } from './commands/captions';
 import { runInit, runSummary, runVersion } from './commands/project';
 
 export type { CliIo } from './commands/context';
@@ -29,6 +30,8 @@ Project
   summary [--json]                       Name, canvas, duration, counts and project summary
   import <file...> [--track <id>] [--index <n>]
                                          Probe media and place it on the timeline
+  captions <file.srt|file.vtt> [--offset <ms>]
+                                         Import subtitles into the text track
   apply --json '<commands-array>'        Apply validated edit commands
   apply --file <commands.json>           ...or read them from a file ({"commands": [...]} works too)
   undo | redo                            Step through the CLI edit history
@@ -61,6 +64,7 @@ const COMMANDS: Record<string, Handler> = {
   init: runInit,
   summary: runSummary,
   import: runImport,
+  captions: runCaptions,
   apply: runApply,
   undo: runUndo,
   redo: runRedo,

@@ -3,8 +3,10 @@ import { homedir } from 'node:os';
 import { dirname, extname, isAbsolute, join, resolve } from 'node:path';
 import {
   EditSession,
+  captionsToCommands,
   createEmptyProject,
   describeChanges,
+  parseCaptions,
   projectSummary,
   timelineDurationMs,
   type AgentCommand,
@@ -13,6 +15,7 @@ import {
   type BatchResult,
   type EditCommand,
   type Project,
+  type TextStyle,
 } from '@editbay/core';
 import {
   exportProject,
@@ -51,6 +54,22 @@ export interface ImportResult {
   label: string;
   kind: Asset['kind'];
   durationMs: number;
+}
+
+export interface ImportCaptionsOptions {
+  offsetMs?: number;
+  style?: Partial<TextStyle>;
+  projectDurationMs?: number;
+}
+
+function defaultCaptionLimit(project: Project): number | undefined {
+  const duration = timelineDurationMs(project);
+  return duration > 0 ? duration : undefined;
+}
+
+export interface ImportCaptionsResult {
+  added: number;
+  warnings: string[];
 }
 
 export interface ApplyReport {
@@ -278,6 +297,55 @@ export class HeadlessStudio {
     }
     await this.save();
     return imported;
+  }
+
+  async importCaptions(
+    filePath: string,
+    options: ImportCaptionsOptions = {},
+  ): Promise<ImportCaptionsResult> {
+    const path = isAbsolute(filePath) ? filePath : resolve(filePath);
+    if (!existsSync(path)) {
+      throw new Error(`Caption file not found: ${filePath}`);
+    }
+
+    const content = await fs.readFile(path, 'utf8');
+    const ext = extname(path).toLowerCase();
+    const format = ext === '.vtt' ? 'vtt' : ext === '.srt' ? 'srt' : undefined;
+
+    const parseResult = parseCaptions(content, format);
+    const warnings = [...parseResult.warnings];
+
+    if (parseResult.cues.length === 0) {
+      return { added: 0, warnings };
+    }
+
+    const commands = captionsToCommands(parseResult.cues, {
+      offsetMs: options.offsetMs,
+      style: options.style,
+      // Captions past the picture would stretch the project into a black
+      // tail, so clamp to the current length unless the caller overrides it.
+      projectDurationMs: options.projectDurationMs ?? defaultCaptionLimit(this.project),
+      warnings,
+    });
+
+    if (commands.length === 0) {
+      return { added: 0, warnings };
+    }
+
+    const before = this.project;
+    // Apply all captions in a single batch so one undo rolls them all back.
+    const batch = this.session.applyBatch(commands);
+    if (!batch.ok) {
+      const changed = JSON.stringify(before) !== JSON.stringify(this.project);
+      if (changed) this.session.undo();
+      const failed = batch.results.find((result) => !result.ok);
+      const reason = failed !== undefined && !failed.ok ? failed.error.message : 'the command batch was rejected';
+      throw new Error(`Could not import captions: ${reason}`);
+    }
+
+    await this.save();
+    const added = batch.results.filter((result) => result.ok).length;
+    return { added, warnings };
   }
 
   async exportVideo(

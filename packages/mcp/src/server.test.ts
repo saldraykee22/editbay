@@ -167,6 +167,7 @@ describe('editbay mcp server', () => {
       'get_project',
       'apply_commands',
       'import_media',
+      'import_captions',
       'probe_media',
       'undo',
       'redo',
@@ -299,6 +300,29 @@ describe('editbay mcp server', () => {
     });
     expect(reply.isError).toBe(true);
     expect(textOf(reply)).toContain('overlay track');
+  });
+
+  it('imports captions through import_captions tool', async () => {
+    const local = await createHarness({ seeded: true });
+    const srtPath = join(local.root, 'captions.srt');
+    await writeFile(
+      srtPath,
+      `1\n00:00:01,000 --> 00:00:03,000\nMCP Caption 1\n\n2\n00:00:04,000 --> 00:00:06,000\nMCP Caption 2\n`,
+      'utf8',
+    );
+    const reply = await call(local, 'import_captions', { path: srtPath, offsetMs: 200 });
+    expect(reply.isError).toBeFalsy();
+    const payload = jsonOf<{ added: number; warnings: string[] }>(reply);
+    // The seeded timeline is 2.5 s long: the first cue is clamped to the
+    // picture and the second (4.2 s with the offset) is dropped, so captions
+    // never stretch the project into a black tail.
+    expect(payload.added).toBe(1);
+    expect(payload.warnings).toHaveLength(2);
+    expect(payload.warnings[0]).toContain('clamped to 2500ms');
+    expect(payload.warnings[1]).toContain('outside project duration');
+
+    const project = jsonOf<ProjectPayload>(await call(local, 'get_project'));
+    expect(project.texts.some((t) => t.text === 'MCP Caption 1' && t.startMs === 1200)).toBe(true);
   });
 
   it('rejects an unknown op with an actionable tool error', async () => {

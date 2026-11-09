@@ -56,6 +56,7 @@ Flags: `--project`, `--workspace`, `--builtin-skills`, `--name`. Env equivalents
 | `get_project` | Canvas, duration, assets, tracks, clips, texts, effects — labels only, never paths. |
 | `apply_commands` | The only mutation path; validated, undoable, per-command results. |
 | `import_media` | Probe and add local files. |
+| `import_captions` | Import SRT or WebVTT subtitles into the text track. |
 | `probe_media` | Metadata for one file. |
 | `undo` / `redo` | History. |
 | `export_video` | MP4 render with quality preset. |
@@ -64,6 +65,10 @@ Flags: `--project`, `--workspace`, `--builtin-skills`, `--name`. Env equivalents
 | `list_skills` / `read_skill` / `write_skill` | Playbooks the agent can follow or author. |
 | `remember` / `search_memory` | Brand facts as markdown. |
 | `get_brand` / `save_brand` | Brand identity files. |
+
+## Subtitle importing
+
+The `import_captions` tool takes a local `.srt` or `.vtt` file path and optional `offsetMs`. It parses timestamps, strips styling tags, generates `add_text` commands, and applies them to the text track in a single atomic batch that can be reverted with `undo`.
 
 ## Why agents like it
 

@@ -29,6 +29,20 @@ export { applyCommand, applyCommands } from './commands';
 export { describeChanges } from './changes';
 export { projectSummary } from './summary';
 export { EditSession } from './session';
+export {
+  cleanCaptionText,
+  DEFAULT_CAPTION_STYLE,
+  captionsToCommands,
+  parseCaptions,
+  parseSrt,
+  parseTimestampMs,
+  parseVtt,
+} from './captions';
+export type {
+  CaptionParseResult,
+  CaptionsToCommandsOptions,
+  Cue,
+} from './captions';
 
 export { DEFAULT_CANVAS, DEFAULT_TEXT_STYLE, DEFAULT_TRANSFORM } from './types';
 

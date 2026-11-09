@@ -29,6 +29,7 @@ editbay export ./out.mp4 --quality standard
 | `init [--name]` | Create the project file (4 tracks, 1080×1920@30). |
 | `summary [--json]` | Canvas, duration, tracks, clips, assets + the model-safe summary. |
 | `import <file...>` | Probe and add media; video/images go to the video track, audio to the audio track. |
+| `captions <file> [--offset <ms>]` | Import SRT or WebVTT subtitles into the text track (single undo step). |
 | `apply --json '<commands>'` / `--file cmds.json` | Apply validated commands; exit 2 if any fail. |
 | `undo` / `redo` | Journal-backed per-project history. |
 | `export <out.mp4>` | Render with FFmpeg; progress on stderr. |
@@ -37,6 +38,18 @@ editbay export ./out.mp4 --quality standard
 | `skills list\|show\|add` | Read built-in skills, write your own. |
 | `memory remember\|search` | Durable brand notes as markdown. |
 | `brands list\|show` | Brand identities. |
+
+## Subtitles and captions
+
+Import `.srt` or `.vtt` subtitles into the text track as a single undoable batch:
+
+```bash
+editbay captions ./subs.srt --offset 500
+```
+
+- Automatically parses timestamps, cleans tags (`<i>`, `<b>`, SSA overrides), and normalizes text.
+- Use `--offset <ms>` to shift all caption timings forward or backward.
+- A single `editbay undo` reverts all imported captions.
 
 ## Scripting notes
 

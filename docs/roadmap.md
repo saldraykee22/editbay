@@ -17,7 +17,8 @@
 - [ ] Waveforms and audio scrubbing
 - [ ] Keyframes for transform/opacity
 - [ ] Effect stack UI (drag to reorder, parameter sliders)
-- [ ] Caption track from an SRT / transcript
+- [x] Caption track from SRT/VTT
+- [ ] Captions from a transcript (needs local STT)
 - [ ] Project version history and diff view
 
 ## v0.3 — the agent that earns trust
