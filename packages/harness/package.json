@@ -8,6 +8,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./agent": "./src/agent.ts",
+    "./frontmatter": "./src/frontmatter.ts",
     "./tools": "./src/tools.ts",
     "./prompt": "./src/prompt.ts",
     "./types": "./src/types.ts",

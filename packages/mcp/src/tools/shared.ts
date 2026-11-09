@@ -5,8 +5,8 @@
  * process: tool payloads are built from labels, ids and timeline numbers only.
  */
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
-import { clipTimelineDurationMs } from '@editbay/core';
-import type { Clip, EffectInstance, Project, Track } from '@editbay/core';
+import { DEFAULT_TRANSFORM, clipStartMsOnTrack } from '@editbay/core';
+import type { Clip, EffectInstance, EffectParam, Project, TextItem, Track } from '@editbay/core';
 
 /** Serializes a tool result as a single JSON text block. */
 export function jsonResult(value: unknown): CallToolResult {
@@ -31,28 +31,29 @@ export function assetLabel(project: Project, assetId: string): string {
 }
 
 /**
- * Timeline start of a clip. The main video track is sequential; other tracks
- * use the clip's own `startMs`.
+ * Model-safe effect references: id, type, params and the optional in-clip
+ * window. Params are primitives, so they are safe to send to a model.
  */
-export function clipStartMs(track: Track, index: number): number {
-  if (track.kind !== 'video') {
-    const clip = track.clips[index];
-    return Math.round(clip?.startMs ?? 0);
-  }
-  let start = 0;
-  for (let cursor = 0; cursor < index; cursor += 1) {
-    const clip = track.clips[cursor];
-    if (clip) start += clipTimelineDurationMs(clip);
-  }
-  return start;
+export function effectRefs(effects: EffectInstance[] | undefined): Array<{
+  id: string;
+  type: string;
+  params: Record<string, EffectParam>;
+  startMs?: number;
+  durationMs?: number;
+}> {
+  return (effects ?? []).map((effect) => ({
+    id: effect.id,
+    type: effect.type,
+    params: { ...effect.params },
+    ...(effect.startMs === undefined ? {} : { startMs: effect.startMs }),
+    ...(effect.durationMs === undefined ? {} : { durationMs: effect.durationMs }),
+  }));
 }
 
-/** Model-safe effect references (id + type, no implementation details). */
-export function effectRefs(effects: EffectInstance[] | undefined): Array<{ id: string; type: string }> {
-  return (effects ?? []).map((effect) => ({ id: effect.id, type: effect.type }));
-}
-
-/** Compact, model-safe view of a clip for `get_project`. */
+/**
+ * Compact, model-safe view of a clip for `get_project`. Timeline numbers come
+ * from `@editbay/core` so transitions and speed match the engine exactly.
+ */
 export function clipView(project: Project, track: Track, clip: Clip, index: number) {
   return {
     id: clip.id,
@@ -60,8 +61,35 @@ export function clipView(project: Project, track: Track, clip: Clip, index: numb
     label: assetLabel(project, clip.assetId),
     inMs: clip.inMs,
     outMs: clip.outMs,
-    startMs: clipStartMs(track, index),
+    startMs: clipStartMsOnTrack(track, index),
+    speed: clip.speed ?? 1,
+    volume: clip.volume ?? 1,
+    transform: clip.transform ?? DEFAULT_TRANSFORM,
+    ...(clip.transitionOut === undefined
+      ? {}
+      : {
+          transitionOut: {
+            id: clip.transitionOut.id,
+            type: clip.transitionOut.type,
+            durationMs: clip.transitionOut.durationMs,
+            params: { ...(clip.transitionOut.params ?? {}) },
+          },
+        }),
+    audioFadeInMs: clip.audioFadeInMs ?? 0,
+    audioFadeOutMs: clip.audioFadeOutMs ?? 0,
     effects: effectRefs(clip.effects),
+  };
+}
+
+/** Compact, model-safe view of a text item (style is plain JSON). */
+export function textView(item: TextItem) {
+  return {
+    id: item.id,
+    text: item.text,
+    startMs: item.startMs,
+    durationMs: item.durationMs,
+    style: { ...item.style },
+    animation: item.animation ?? 'none',
   };
 }
 

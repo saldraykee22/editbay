@@ -1,5 +1,6 @@
 import { _electron as electron } from 'playwright';
 import { electronPath as electronPathFor } from './lib/electron-path.mjs';
+import { seedWorkspaceProject } from './lib/workspace.mjs';
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -97,16 +98,12 @@ const project = {
   ],
 };
 
+seedWorkspaceProject(project);
 const app = await electron.launch({ executablePath: electronPath, args: [appDir], cwd: appDir });
 const page = await app.firstWindow();
-await page.waitForTimeout(600);
-const info = await page.evaluate(() => window.editbay.appInfo());
-mkdirSync(resolve(info.workspaceRoot, 'projects'), { recursive: true });
-writeFileSync(resolve(info.workspaceRoot, 'projects/current.json'), JSON.stringify(project, null, 2), 'utf8');
-await page.reload();
 await page.waitForTimeout(2600);
 await page.evaluate(() => document.querySelector('.stage-frame')?.scrollIntoView());
 await page.screenshot({ path: resolve(root, 'docs/screenshots/app-demo.png') });
 const text = await page.evaluate(() => document.body.innerText);
-console.log(JSON.stringify({ workspace: info.workspaceRoot, hasTimeline: text.includes('Timeline') || text.includes('TIMELINE'), clips: text.match(/\d+ clips/)?.[0], text: text.slice(0, 400) }, null, 2));
+console.log(JSON.stringify({ hasTimeline: text.includes('Timeline') || text.includes('TIMELINE'), clips: text.match(/\d+ clips/)?.[0], text: text.slice(0, 400) }, null, 2));
 await app.close();

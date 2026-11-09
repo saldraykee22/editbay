@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 import type { Asset, Clip, Project, TextStyle } from '@editbay/core';
 import { effectCatalog } from '@editbay/effects';
 import type { EffectCatalog, FfmpegEffectMeta } from '@editbay/effects';
+import { selectVideoEncoder, videoEncoderArgs } from './encoder';
 import { repoRoot } from './ffmpeg';
 import {
   audibleTracks,
@@ -54,6 +55,13 @@ export interface RenderPlanOptions {
   fontPath?: string;
   /** Catalog override for workspaces and tests. */
   catalog?: EffectCatalog;
+  /**
+   * Pin the H.264 encoder instead of probing the binary. `EDITBAY_VIDEO_ENCODER`
+   * has the same effect at the process level.
+   */
+  videoEncoder?: string;
+  /** Probed encoder list override (tests avoid spawning ffmpeg). */
+  availableEncoders?: readonly string[];
 }
 
 export interface TextFile {
@@ -136,17 +144,49 @@ const PLATFORM_FONT_FALLBACKS: Record<string, string[]> = {
   linux: ['/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', '/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf'],
 };
 
+const BUNDLED_FONT_FILE = 'IBMPlexSans-SemiBold.ttf';
+
 /**
- * Resolve a usable font file: explicit option, `EDITBAY_FONT`, the bundled IBM
- * Plex SemiBold, then the platform fallbacks. Returns undefined when nothing
- * exists; drawtext then relies on the build's fontconfig support.
+ * `process.resourcesPath` only exists inside Electron. Read it defensively so
+ * the engine stays a plain Node package.
+ */
+function electronResourcesPath(): string | undefined {
+  const value = (process as NodeJS.Process & { resourcesPath?: unknown }).resourcesPath;
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+/**
+ * Bundled font locations, in priority order:
+ *   1. Electron's `process.resourcesPath` (packaged desktop app)
+ *   2. `EDITBAY_RESOURCES_DIR` (ported bundles, CLI/MCP installs)
+ *   3. the monorepo's `apps/desktop/resources/fonts`
+ */
+function bundledFontCandidates(): string[] {
+  const roots: string[] = [];
+  const resourcesPath = electronResourcesPath();
+  if (resourcesPath) roots.push(resourcesPath);
+  const envDir = process.env.EDITBAY_RESOURCES_DIR;
+  if (envDir) roots.push(envDir);
+
+  const candidates: string[] = [];
+  for (const root of roots) {
+    candidates.push(path.join(root, 'fonts', BUNDLED_FONT_FILE));
+    candidates.push(path.join(root, BUNDLED_FONT_FILE));
+  }
+  candidates.push(path.join(repoRoot(), 'apps', 'desktop', 'resources', 'fonts', BUNDLED_FONT_FILE));
+  return candidates;
+}
+
+/**
+ * Resolve a usable font file: explicit option, `EDITBAY_FONT`, a packaged
+ * resource directory, the monorepo bundle, then platform fallbacks. Returns
+ * undefined when nothing exists; drawtext then relies on fontconfig.
  */
 export function resolveFontPath(explicit?: string): string | undefined {
-  const bundled = path.join(repoRoot(), 'apps', 'desktop', 'resources', 'fonts', 'IBMPlexSans-SemiBold.ttf');
   const candidates: Array<string | undefined> = [
     explicit,
     process.env.EDITBAY_FONT,
-    bundled,
+    ...bundledFontCandidates(),
     ...(PLATFORM_FONT_FALLBACKS[process.platform] ?? []),
   ];
   for (const candidate of candidates) {
@@ -206,13 +246,74 @@ function drawtextOptions(
 /* Effects                                                            */
 /* ------------------------------------------------------------------ */
 
-/** `:enable='between(t,a,b)'` on each simple filter in a comma chain. */
-function withEnableWindow(filter: string, startSec: number, endSec: number): string {
+/**
+ * Split an ffmpeg filter chain on top-level commas. Commas inside single or
+ * double quotes, parentheses or brackets belong to an expression argument and
+ * must not split the chain (e.g. `drawtext=text='a,b'`).
+ */
+export function splitFilterChain(filter: string): string[] {
+  const segments: string[] = [];
+  let current = '';
+  let depth = 0;
+  let quote: '"' | "'" | undefined;
+
+  for (let index = 0; index < filter.length; index += 1) {
+    const char = filter[index];
+    if (char === undefined) continue;
+
+    if (quote) {
+      current += char;
+      if (char === '\\') {
+        const escaped = filter[index + 1];
+        if (escaped !== undefined) {
+          current += escaped;
+          index += 1;
+        }
+        continue;
+      }
+      if (char === quote) quote = undefined;
+      continue;
+    }
+
+    if (char === '"' || char === "'") {
+      quote = char;
+      current += char;
+      continue;
+    }
+    if (char === '(' || char === '[') depth += 1;
+    else if ((char === ')' || char === ']') && depth > 0) depth -= 1;
+
+    if (char === ',' && depth === 0) {
+      segments.push(current);
+      current = '';
+      continue;
+    }
+    current += char;
+  }
+
+  segments.push(current);
+  return segments;
+}
+
+/**
+ * `:enable='between(t,a,b)'` on each top-level filter in a chain.
+ *
+ * `zoompan` is deliberately left alone: it rebuilds PTS from the frame counter
+ * and cannot honour a timeline window, so the caller warns instead.
+ */
+export function withEnableWindow(filter: string, startSec: number, endSec: number): string {
   const window = `:enable='between(t,${startSec.toFixed(3)},${endSec.toFixed(3)})'`;
-  return filter
-    .split(',')
-    .map((segment) => (segment.includes('enable=') ? segment : `${segment}${window}`))
+  return splitFilterChain(filter)
+    .map((segment) => {
+      if (segment.trimStart().startsWith('zoompan')) return segment;
+      return segment.includes('enable=') ? segment : `${segment}${window}`;
+    })
     .join(',');
+}
+
+/** True when a chain contains a filter that bakes absolute times into args. */
+function hasOwnTimeWindow(filter: string): boolean {
+  return splitFilterChain(filter).some((segment) => /^\s*(?:fade|zoompan)=/.test(segment));
 }
 
 function effectFilters(
@@ -262,7 +363,7 @@ function effectFilters(
     // window is ignored for them (documented engine limitation).
     const partialWindow = startMs > 0 || windowMs < clipDurMs;
     if (partialWindow) {
-      if (/fade|zoompan/.test(filter)) {
+      if (hasOwnTimeWindow(filter)) {
         warnings.push(
           `Effect "${instance.type}" window was ignored: its FFmpeg filter is not timeline-aware, so it applies to the whole clip.`,
         );
@@ -290,15 +391,20 @@ function isDefaultTransform(clip: Clip): boolean {
 function transformFilters(clip: Clip): string[] {
   const t = clip.transform;
   if (!t) return [];
-  const filters: string[] = [];
+  // `format=rgba` first: scaling a yuv420p stream to an odd width/height (e.g.
+  // 1080 * 0.501 = 541) fails chroma subsampling before any conversion happens.
+  const filters: string[] = ['format=rgba'];
   if (t.scale !== 1) {
     const scale = Math.min(8, Math.max(0.05, t.scale));
-    filters.push(`scale=iw*${num(scale)}:ih*${num(scale)}`);
+    // Round down to even pixels, never below 2, so the scaled layer can always
+    // be composited back onto the yuv420p canvas.
+    filters.push(
+      `scale=w='max(2,trunc(iw*${num(scale)}/2)*2)':h='max(2,trunc(ih*${num(scale)}/2)*2)'`,
+    );
   }
   if (t.rotation !== 0) {
     filters.push(`rotate=${num((t.rotation * Math.PI) / 180)}:c=none:ow=rotw(iw):oh=roth(ih)`);
   }
-  filters.push('format=rgba');
   if (t.opacity < 1) filters.push(`colorchannelmixer=aa=${num(Math.max(0, t.opacity))}`);
   return filters;
 }
@@ -406,12 +512,26 @@ export function buildRenderPlan(project: Project, options: RenderPlanOptions): E
   const inputArgs: string[] = [];
   const mainInputIndex = new Map<string, number>();
 
-  const addInput = (assetPath: string, isImage: boolean, durationMs: number): number => {
+  const addInput = (
+    assetPath: string,
+    isImage: boolean,
+    durationMs: number,
+    seek?: { inMs: number; outMs: number },
+  ): number => {
     const index = inputs.length;
     inputs.push(assetPath);
     if (isImage) {
       inputArgs.push('-loop', '1', '-t', sec(durationMs + 1000), '-i', assetPath);
     } else {
+      // Input-level seeking stops each split clip from decoding its source from
+      // 0. Video and its clip audio share this single input, so both branches
+      // see the same timestamps and stay in sync; images have no timeline to
+      // seek, and speed changes are applied after the seek (they only retime
+      // the same source span), so both stay safe.
+      const inMs = Math.max(0, seek?.inMs ?? 0);
+      const outMs = Math.max(inMs, seek?.outMs ?? 0);
+      if (inMs > 0) inputArgs.push('-ss', sec(inMs));
+      if (outMs > inMs) inputArgs.push('-to', sec(outMs));
       inputArgs.push('-i', assetPath);
     }
     return index;
@@ -432,12 +552,20 @@ export function buildRenderPlan(project: Project, options: RenderPlanOptions): E
     }
     const assetPath = pathFor(asset);
     const sourceDurationMs = asset.kind === 'image' ? clip.outMs : entry.durationMs;
-    const inputIndex = addInput(assetPath, asset.kind === 'image', sourceDurationMs);
+    const inputIndex = addInput(assetPath, asset.kind === 'image', sourceDurationMs, {
+      inMs: clip.inMs,
+      outMs: clip.outMs,
+    });
     mainInputIndex.set(clip.id, inputIndex);
+
+    // Non-image inputs are pre-seeked in the demuxer, so the filter only trims
+    // the zero-based remainder. Images keep their original trim window.
+    const trimStartMs = asset.kind === 'image' ? clip.inMs : 0;
+    const trimEndMs = asset.kind === 'image' ? clip.outMs : Math.max(0, clip.outMs - clip.inMs);
 
     const speed = clampSpeed(clip.speed);
     const filters: string[] = [
-      `[${inputIndex}:v]trim=start=${sec(clip.inMs)}:end=${sec(clip.outMs)}`,
+      `[${inputIndex}:v]trim=start=${sec(trimStartMs)}:end=${sec(trimEndMs)}`,
       speed === 1 ? 'setpts=PTS-STARTPTS' : `setpts=(PTS-STARTPTS)/${num(speed)}`,
       `fps=${num(fps)}`,
       `scale=${width}:${height}:force_original_aspect_ratio=increase`,
@@ -545,14 +673,32 @@ export function buildRenderPlan(project: Project, options: RenderPlanOptions): E
     if (!asset.hasAudio || volume === 0) continue;
     const inputIndex = mainInputIndex.get(clip.id);
     if (inputIndex === undefined) continue;
+
+    const startSec = entry.startMs / 1000;
+    const durationMs = entry.durationMs;
+    const durationSec = durationMs / 1000;
+    const fadeInMs = Math.max(0, clip.audioFadeInMs ?? 0);
+    const fadeOutMs = Math.max(0, clip.audioFadeOutMs ?? 0);
+
     const audioFilters = [
-      `[${inputIndex}:a]atrim=start=${sec(clip.inMs)}:end=${sec(clip.outMs)}`,
+      `[${inputIndex}:a]atrim=start=0.000:end=${sec(clip.outMs - clip.inMs)}`,
       'asetpts=PTS-STARTPTS',
       `volume=${num(volume)}`,
       ...atempoChain(clampSpeed(clip.speed)),
       // Without an explicit delay the audio of later clips would start at 0
       // while their picture is shifted by the transition overlap.
       ...(entry.startMs > 0 ? [`adelay=${entry.startMs}|${entry.startMs}`] : []),
+      // Clip-level fades apply to the clip's own audio just like audio tracks.
+      ...(fadeInMs > 0
+        ? [`afade=t=in:st=${startSec.toFixed(3)}:d=${(Math.min(fadeInMs, durationMs) / 1000).toFixed(3)}`]
+        : []),
+      ...(fadeOutMs > 0 && fadeOutMs <= durationMs
+        ? [
+            `afade=t=out:st=${(startSec + durationSec - fadeOutMs / 1000).toFixed(3)}:d=${(
+              fadeOutMs / 1000
+            ).toFixed(3)}`,
+          ]
+        : []),
       ...AUDIO_NORMALIZE,
     ];
     const label = `a${audioLabels.length}`;
@@ -570,8 +716,14 @@ export function buildRenderPlan(project: Project, options: RenderPlanOptions): E
         warnings.push(`Image asset "${asset.label}" has no audio and was skipped on the audio track.`);
         continue;
       }
+      // A silent video on an audio track must never produce `[N:a]`; ffmpeg
+      // aborts the whole filtergraph when the stream specifier matches nothing.
+      if (asset.hasAudio === false) {
+        warnings.push(`Asset "${asset.label}" has no audio and was skipped on the audio track.`);
+        continue;
+      }
       const durationMs = clipDurationMs(clip);
-      const inputIndex = addInput(assetPath, false, durationMs);
+      const inputIndex = addInput(assetPath, false, durationMs, { inMs: clip.inMs, outMs: clip.outMs });
       const startMs = Math.max(0, clip.startMs ?? 0);
       const startSec = startMs / 1000;
       const durationSec = durationMs / 1000;
@@ -579,16 +731,18 @@ export function buildRenderPlan(project: Project, options: RenderPlanOptions): E
       const fadeOutMs = Math.max(0, clip.audioFadeOutMs ?? 0);
 
       const audioFilters = [
-        `[${inputIndex}:a]atrim=start=${sec(clip.inMs)}:end=${sec(clip.outMs)}`,
+        `[${inputIndex}:a]atrim=start=0.000:end=${sec(clip.outMs - clip.inMs)}`,
         'asetpts=PTS-STARTPTS',
         `volume=${num(volume)}`,
         ...atempoChain(clampSpeed(clip.speed)),
         `adelay=${startMs}|${startMs}`,
       ];
       if (fadeInMs > 0) {
-        audioFilters.push(`afade=t=in:st=${startSec.toFixed(3)}:d=${(fadeInMs / 1000).toFixed(3)}`);
+        audioFilters.push(
+          `afade=t=in:st=${startSec.toFixed(3)}:d=${(Math.min(fadeInMs, durationMs) / 1000).toFixed(3)}`,
+        );
       }
-      if (fadeOutMs > 0 && fadeOutMs < durationMs) {
+      if (fadeOutMs > 0 && fadeOutMs <= durationMs) {
         const fadeOutStart = startSec + durationSec - fadeOutMs / 1000;
         audioFilters.push(`afade=t=out:st=${fadeOutStart.toFixed(3)}:d=${(fadeOutMs / 1000).toFixed(3)}`);
       }
@@ -615,6 +769,20 @@ export function buildRenderPlan(project: Project, options: RenderPlanOptions): E
   const preset = QUALITY_PRESETS[quality];
   const outPath = options.outPath ?? 'output.mp4';
 
+  const encoderChoice = selectVideoEncoder({
+    override: options.videoEncoder,
+    ...(options.availableEncoders ? { available: options.availableEncoders } : {}),
+  });
+  if (encoderChoice.warning) warnings.push(encoderChoice.warning);
+  const encodeArgs = videoEncoderArgs({
+    encoder: encoderChoice.encoder,
+    quality,
+    preset,
+    width,
+    height,
+    fps,
+  });
+
   const args: string[] = [
     '-y',
     '-hide_banner',
@@ -628,12 +796,7 @@ export function buildRenderPlan(project: Project, options: RenderPlanOptions): E
     '-map',
     '[vfinal]',
     ...(audioLabels.length > 0 ? ['-map', '[aout]'] : []),
-    '-c:v',
-    'libx264',
-    '-preset',
-    preset.preset,
-    '-crf',
-    preset.crf,
+    ...encodeArgs,
     '-pix_fmt',
     'yuv420p',
     '-r',
@@ -656,6 +819,7 @@ export function buildRenderPlan(project: Project, options: RenderPlanOptions): E
     filterGraph: lines.join(';'),
     durationMs,
     inputs,
+    videoEncoder: encoderChoice.encoder,
     textFiles,
     warnings,
     width,

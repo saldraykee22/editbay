@@ -267,8 +267,11 @@ function stringArray(value: FrontMatterValue | undefined): string[] {
   return [];
 }
 
-function isSafeSkillId(id: string): boolean {
-  return /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id) && !id.includes('..');
+/** Skill ids become directory names; only lowercase slugs are allowed. */
+const SKILL_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+
+export function isSafeSkillId(id: string): boolean {
+  return typeof id === 'string' && SKILL_ID_PATTERN.test(id);
 }
 
 async function pathExists(target: string): Promise<boolean> {

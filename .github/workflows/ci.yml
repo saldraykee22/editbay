@@ -26,7 +26,8 @@ jobs:
       - run: pnpm build:cli
       - run: pnpm build:mcp
 
-  build:
+  # Typecheck and tests are the quality gate (there is no linter yet).
+  quality:
     strategy:
       fail-fast: false
       matrix:
@@ -43,4 +44,7 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build:cli
+      - run: pnpm build:mcp
       - run: pnpm build

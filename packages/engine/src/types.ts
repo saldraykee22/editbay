@@ -36,6 +36,8 @@ export interface ExportResult {
   durationMs: number;
   sizeBytes: number;
   elapsedMs: number;
+  /** H.264 encoder used for this export (e.g. `libx264`, `libopenh264`). */
+  videoEncoder: string;
 }
 
 export interface RenderPlan {
@@ -45,6 +47,8 @@ export interface RenderPlan {
   durationMs: number;
   /** Input file paths in ffmpeg input order. */
   inputs: string[];
+  /** H.264 encoder chosen for this plan. */
+  videoEncoder: string;
 }
 
 export interface ThumbnailOptions {

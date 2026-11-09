@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { BrandMark, Button, Chip, Icon, IconButton, Modal, Progress } from '@editbay/ui';
 import type { Project } from '@editbay/core';
-import { createEmptyProject, EditSession } from '@editbay/core';
+import { clipStartMsOnTrack, clipTimelineDurationMs, createEmptyProject, EditSession } from '@editbay/core';
 import { EditorStore, useEditorVersion } from './state/store';
 import { loadSettings, providerPreset, saveSettings, type AppSettings } from './state/settings';
 import { useAgentController } from './state/agent';
@@ -34,6 +34,7 @@ export function App() {
   const [notice, setNotice] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [projectMenu, setProjectMenu] = useState(false);
+  const [pendingAction, setPendingAction] = useState<'new' | 'open' | null>(null);
   const project = store.project;
   const saveTimer = useRef<number | null>(null);
 
@@ -61,6 +62,17 @@ export function App() {
     const unsubscribe = store.onChange(() => {
       if (saveTimer.current) window.clearTimeout(saveTimer.current);
       saveTimer.current = window.setTimeout(() => {
+        if (store.projectPath) {
+          // Autosave the opened document, so the user's file is never stale.
+          const revision = store.projectRevision;
+          void window.editbay
+            .saveProject(store.session.toJSON(), store.projectPath)
+            .then((saved) => {
+              if (saved && store.projectRevision === revision) store.markSaved();
+            })
+            .catch(() => undefined);
+          return;
+        }
         void window.editbay.workspace.write(AUTOSAVE_PATH, store.session.toJSON());
       }, 700);
     });
@@ -107,6 +119,66 @@ export function App() {
     });
   }, [project]);
 
+  const saveProjectAs = useCallback(async () => {
+    setProjectMenu(false);
+    const safeName = (store.project.name || 'editbay').replace(/[^a-z0-9-_ ]/gi, '').trim() || 'editbay';
+    try {
+      const path = await window.editbay.saveProjectAs(store.session.toJSON(), `${safeName}.json`);
+      if (!path) return;
+      store.projectPath = path;
+      store.markSaved();
+      flash('Project saved');
+    } catch (error) {
+      flash(error instanceof Error ? error.message : 'Save failed');
+    }
+  }, [store]);
+
+  const saveProject = useCallback(async () => {
+    if (!store.projectPath) {
+      await saveProjectAs();
+      return;
+    }
+    try {
+      const path = await window.editbay.saveProject(store.session.toJSON(), store.projectPath);
+      if (!path) return;
+      store.markSaved();
+      flash('Project saved');
+    } catch (error) {
+      flash(error instanceof Error ? error.message : 'Save failed');
+    }
+  }, [saveProjectAs, store]);
+
+  const newProject = useCallback(() => {
+    setProjectMenu(false);
+    store.load(createEmptyProject('Untitled'), null);
+  }, [store]);
+
+  const openProject = useCallback(async () => {
+    setProjectMenu(false);
+    const opened = await window.editbay.openProjectDialog();
+    if (!opened) return;
+    try {
+      const session = EditSession.fromJSON(opened.content);
+      store.load(session.project, opened.path);
+      flash('Project opened');
+    } catch {
+      flash('That file is not a valid Editbay project');
+    }
+  }, [store]);
+
+  const requestProjectChange = useCallback(
+    (action: 'new' | 'open') => {
+      if (store.isDirty) {
+        setProjectMenu(false);
+        setPendingAction(action);
+        return;
+      }
+      if (action === 'new') newProject();
+      else void openProject();
+    },
+    [newProject, openProject, store],
+  );
+
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
@@ -118,6 +190,11 @@ export function App() {
         return;
       }
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
+        event.preventDefault();
+        void saveProject();
+        return;
+      }
+      if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === 'e') {
         event.preventDefault();
         void exportVideo();
         return;
@@ -138,52 +215,24 @@ export function App() {
       }
       if (event.key.toLowerCase() === 's') {
         const track = project.tracks.find((t) => t.kind === 'video');
-        let cursor = 0;
-        for (const clip of track?.clips ?? []) {
-          const duration = Math.max(1, Math.round((clip.outMs - clip.inMs) / (clip.speed ?? 1)));
+        if (!track) return;
+        for (let index = 0; index < track.clips.length; index += 1) {
+          const clip = track.clips[index];
+          if (!clip) continue;
+          const cursor = clipStartMsOnTrack(track, index);
+          const duration = clipTimelineDurationMs(clip);
           if (store.playheadMs > cursor + 100 && store.playheadMs < cursor + duration - 100) {
             store.apply({ op: 'split_clip', clipId: clip.id, atMs: store.playheadMs - cursor });
             break;
           }
-          cursor += duration;
         }
       }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [store, project, exportVideo]);
+  }, [store, project, exportVideo, saveProject]);
 
   const durationSec = (store.durationMs / 1000).toFixed(1);
-
-  const newProject = () => {
-    setProjectMenu(false);
-    store.load(createEmptyProject('Untitled'), null);
-  };
-
-  const openProject = async () => {
-    setProjectMenu(false);
-    const opened = await window.editbay.openProjectDialog();
-    if (!opened) return;
-    try {
-      const session = EditSession.fromJSON(opened.content);
-      store.load(session.project, opened.path);
-      flash('Project opened');
-    } catch {
-      flash('That file is not a valid Editbay project');
-    }
-  };
-
-  const saveProjectAs = async () => {
-    setProjectMenu(false);
-    const path = await window.editbay.saveProjectAs(
-      store.session.toJSON(),
-      `${(project.name || 'editbay').replace(/[^a-z0-9-_ ]/gi, '').trim() || 'editbay'}.json`,
-    );
-    if (path) {
-      store.projectPath = path;
-      flash('Project saved');
-    }
-  };
 
   return (
     <div className="app">
@@ -205,13 +254,16 @@ export function App() {
           <IconButton icon="chevron" title="Project menu" size={13} onClick={() => setProjectMenu((value) => !value)} />
           {projectMenu ? (
             <div className="menu" onMouseLeave={() => setProjectMenu(false)}>
-              <button type="button" onClick={newProject}>
+              <button type="button" onClick={() => requestProjectChange('new')}>
                 New project
               </button>
-              <button type="button" onClick={openProject}>
+              <button type="button" onClick={() => requestProjectChange('open')}>
                 Open project…
               </button>
-              <button type="button" onClick={saveProjectAs}>
+              <button type="button" onClick={() => void saveProject()}>
+                Save {store.projectPath ? '' : 'as…'}
+              </button>
+              <button type="button" onClick={() => void saveProjectAs()}>
                 Save as…
               </button>
               <div className="hairline" />
@@ -285,12 +337,13 @@ export function App() {
                 status={agent.status}
                 connected={agent.connected}
                 onSend={agent.send}
+                onStop={agent.stop}
                 onApply={agent.applyProposal}
                 onDiscard={agent.discardProposal}
                 onOpenSettings={() => setTab('settings')}
               />
             ) : null}
-            {tab === 'brand' ? <BrandPanel /> : null}
+            {tab === 'brand' ? <BrandPanel store={store} /> : null}
             {tab === 'skills' ? <SkillsPanel /> : null}
             {tab === 'settings' ? <SettingsPanel settings={settings} onChange={setSettings} /> : null}
           </div>
@@ -312,6 +365,37 @@ export function App() {
         <span className="sep" />
         <span>{settings.autoApply ? 'auto-apply' : 'confirm edits'}</span>
       </footer>
+
+      {pendingAction ? (
+        <Modal
+          title={pendingAction === 'new' ? 'Discard unsaved edits?' : 'Open another project?'}
+          onClose={() => setPendingAction(null)}
+          footer={
+            <>
+              <Button size="sm" variant="ghost" onClick={() => setPendingAction(null)}>
+                Cancel
+              </Button>
+              <Button
+                size="sm"
+                variant="primary"
+                onClick={() => {
+                  const action = pendingAction;
+                  setPendingAction(null);
+                  if (action === 'new') newProject();
+                  else void openProject();
+                }}
+              >
+                Discard and continue
+              </Button>
+            </>
+          }
+        >
+          <div className="hint">
+            This project has edits that are not saved to a project file. Save it first with Ctrl+S, or discard them and
+            continue.
+          </div>
+        </Modal>
+      ) : null}
 
       {exportState.active ? (
         <Modal title="Exporting" onClose={() => undefined}>

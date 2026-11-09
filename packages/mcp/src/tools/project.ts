@@ -7,7 +7,7 @@
  */
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { HeadlessStudio } from '@editbay/kit';
-import { clipView, errorResult, jsonResult } from './shared';
+import { clipView, errorResult, jsonResult, textView } from './shared';
 
 const HELP_MARKDOWN = `# Editbay MCP — agent quick start
 
@@ -44,7 +44,7 @@ milliseconds; \`inMs\`/\`outMs\` are source points, \`startMs\` is timeline plac
 | split_clip | clipId, atMs | offset from timeline start |
 | duplicate_clip | clipId | |
 | set_volume | clipId, volume | 0..2 |
-| set_audio_start | clipId, startMs | audio/overlay tracks |
+| set_audio_start | clipId, startMs | audio tracks |
 | set_clip_speed | clipId, speed | 0.25..4 |
 | set_clip_transform | clipId, transform | x, y, scale, rotation, opacity |
 | add_text | text, startMs, durationMs | optional style, animation |
@@ -57,6 +57,12 @@ milliseconds; \`inMs\`/\`outMs\` are source points, \`startMs\` is timeline plac
 | remove_transition | clipId | |
 | set_canvas | width, height, fps? | |
 | set_project_name | name | |
+
+## Tracks
+Edit clips on the main video track and audio tracks; text lives on the text
+track. \`overlay\` tracks are not composited by the renderer yet, so do not place
+clips there — put picture-in-picture or logo clips on the video track and place
+them with \`set_clip_transform\`.
 
 ## Example batch
 \`\`\`json
@@ -92,17 +98,13 @@ export function registerProjectTools(server: McpServer, studio: HeadlessStudio):
         const tracks = project.tracks.map((track) => ({
           id: track.id,
           kind: track.kind,
+          ...(track.name === undefined ? {} : { name: track.name }),
+          muted: track.muted === true,
+          hidden: track.hidden === true,
           clips: track.clips.map((clip, index) => clipView(project, track, clip, index)),
         }));
         const texts = project.tracks.flatMap((track) =>
-          track.kind === 'text'
-            ? track.items.map((item) => ({
-                id: item.id,
-                text: item.text,
-                startMs: item.startMs,
-                durationMs: item.durationMs,
-              }))
-            : [],
+          track.kind === 'text' ? track.items.map((item) => textView(item)) : [],
         );
 
         return jsonResult({

@@ -13,6 +13,8 @@ export interface ProviderErrorOptions {
   code?: string;
   providerId?: string;
   retryable?: boolean;
+  /** Server-requested delay before a retry, from `Retry-After`. */
+  retryAfterMs?: number;
   cause?: unknown;
 }
 
@@ -21,6 +23,7 @@ export class ProviderError extends Error {
   readonly code?: string;
   readonly providerId?: string;
   readonly retryable: boolean;
+  readonly retryAfterMs?: number;
 
   constructor(message: string, options: ProviderErrorOptions = {}) {
     super(message, options.cause === undefined ? undefined : { cause: options.cause });
@@ -29,6 +32,7 @@ export class ProviderError extends Error {
     if (options.code !== undefined) this.code = options.code;
     if (options.providerId !== undefined) this.providerId = options.providerId;
     this.retryable = options.retryable ?? false;
+    if (options.retryAfterMs !== undefined) this.retryAfterMs = options.retryAfterMs;
   }
 }
 
@@ -40,8 +44,14 @@ export function emptyResponseError(providerLabel: string): ProviderError {
 }
 
 /** Readable HTTP error; never includes headers, so API keys cannot leak. */
-export function httpError(status: number, providerLabel: string, body?: string): ProviderError {
+export function httpError(
+  status: number,
+  providerLabel: string,
+  body?: string,
+  retryAfterMs?: number,
+): ProviderError {
   const detail = body === undefined ? '' : snippet(body);
+  const retryDelay = retryAfterMs === undefined ? {} : { retryAfterMs };
   if (status === 401 || status === 403) {
     return new ProviderError(
       `API key rejected (HTTP ${status}) by ${providerLabel}. Check or replace the API key.`,
@@ -51,7 +61,7 @@ export function httpError(status: number, providerLabel: string, body?: string):
   if (status === 429) {
     return new ProviderError(
       `Rate limited (HTTP 429) by ${providerLabel}. Wait a moment and try again.`,
-      { status, code: 'rate_limit', retryable: true },
+      { status, code: 'rate_limit', retryable: true, ...retryDelay },
     );
   }
   if (status === 404) {
@@ -63,13 +73,27 @@ export function httpError(status: number, providerLabel: string, body?: string):
   if (status >= 500) {
     return new ProviderError(
       `Provider unavailable (HTTP ${status}) on ${providerLabel}${detail === '' ? '' : `: ${detail}`}`,
-      { status, code: 'server', retryable: true },
+      { status, code: 'server', retryable: true, ...retryDelay },
     );
   }
   return new ProviderError(
     `Provider request failed (HTTP ${status}) on ${providerLabel}${detail === '' ? '' : `: ${detail}`}`,
     { status, code: 'http', retryable: false },
   );
+}
+
+/** Parse a `Retry-After` header (seconds or an HTTP date) into milliseconds. */
+export function parseRetryAfterMs(value: string | null): number | undefined {
+  if (value === null) return undefined;
+  const trimmed = value.trim();
+  if (trimmed === '') return undefined;
+
+  const seconds = Number(trimmed);
+  if (Number.isFinite(seconds)) return Math.max(0, Math.round(seconds * 1000));
+
+  const date = Date.parse(trimmed);
+  if (Number.isNaN(date)) return undefined;
+  return Math.max(0, date - Date.now());
 }
 
 export function networkError(error: unknown, providerLabel: string): ProviderError {
@@ -94,11 +118,14 @@ export function isAbortError(error: unknown): boolean {
 }
 
 export function throwIfAborted(signal?: AbortSignal): void {
-  if (signal?.aborted) {
-    const error = new Error('Request aborted');
-    error.name = 'AbortError';
-    throw error;
-  }
+  if (signal?.aborted) throw abortError();
+}
+
+/** Normalized AbortError so callers can rely on `name === 'AbortError'`. */
+export function abortError(): Error {
+  const error = new Error('Request aborted');
+  error.name = 'AbortError';
+  return error;
 }
 
 export interface ParsedBody {
@@ -133,7 +160,12 @@ export async function sendRequest(
     } catch {
       body = '';
     }
-    throw httpError(response.status, providerLabel, body);
+    throw httpError(
+      response.status,
+      providerLabel,
+      body,
+      parseRetryAfterMs(response.headers.get('retry-after')),
+    );
   }
 
   let text: string;

@@ -36,7 +36,7 @@ export class FileMemoryStore implements MemoryStore {
 
     const brands: BrandProfile[] = [];
     for (const entry of entries) {
-      if (!entry.isDirectory() || !isSafeId(entry.name)) continue;
+      if (!entry.isDirectory() || !isSafeBrandId(entry.name)) continue;
       const brand = await this.getBrand(entry.name);
       if (brand) brands.push(brand);
     }
@@ -45,7 +45,7 @@ export class FileMemoryStore implements MemoryStore {
   }
 
   async getBrand(id: string): Promise<BrandProfile | null> {
-    if (!isSafeId(id)) return null;
+    if (!isSafeBrandId(id)) return null;
     const file = path.join(this.brandsDir, id, 'identity.md');
     let text: string;
     try {
@@ -58,7 +58,7 @@ export class FileMemoryStore implements MemoryStore {
   }
 
   async saveBrand(brand: BrandProfile): Promise<void> {
-    if (!isSafeId(brand.id)) {
+    if (!isSafeBrandId(brand.id)) {
       throw new Error(`Invalid brand id: ${brand.id}`);
     }
     const dir = path.join(this.brandsDir, brand.id);
@@ -348,8 +348,14 @@ function countOccurrences(haystack: string, needle: string): number {
   return count;
 }
 
-function isSafeId(id: string): boolean {
-  return /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id) && !id.includes('..');
+/**
+ * Brand ids become directory names. Only lowercase slugs are allowed so a
+ * brand id can never traverse outside `brands/`.
+ */
+export const BRAND_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+
+export function isSafeBrandId(id: string): boolean {
+  return typeof id === 'string' && BRAND_ID_PATTERN.test(id);
 }
 
 async function pathExists(target: string): Promise<boolean> {

@@ -1,8 +1,9 @@
 import { useMemo, useRef, useState } from 'react';
 import type { Clip, TextItem, Track } from '@editbay/core';
+import { clipTimelineDurationMs } from '@editbay/core';
 import { Button, Field, IconButton, Input, Modal, Select, Textarea } from '@editbay/ui';
 import { EditorStore, useEditorVersion, usePlayhead } from '../state/store';
-import { clipDurationMs, videoClips } from '../lib/compositor';
+import { videoClips } from '../lib/compositor';
 import { Inspector } from './Inspector';
 
 interface DragState {
@@ -84,7 +85,19 @@ export function Timeline({ store }: { store: EditorStore }) {
     if (Math.abs(deltaMs) < 40) return;
 
     if (kind === 'clip') {
-      const clips = project.tracks.find((t) => t.kind === 'video')?.clips ?? [];
+      const location = project.tracks
+        .flatMap((track) => track.clips.map((clip) => ({ track, clip })))
+        .find((entry) => entry.clip.id === id);
+      if (!location) return;
+
+      if (location.track.kind !== 'video') {
+        // Audio and overlay clips are placed absolutely; the drop must persist.
+        const startMs = Math.max(0, Math.round(original.startMs + deltaMs));
+        store.apply({ op: 'set_audio_start', clipId: id, startMs });
+        return;
+      }
+
+      const clips = location.track.clips;
       const currentIndex = clips.findIndex((c) => c.id === id);
       if (currentIndex < 0) return;
       const currentStart = clipStarts.get(id) ?? 0;
@@ -94,12 +107,12 @@ export function Timeline({ store }: { store: EditorStore }) {
       for (let i = 0; i < clips.length; i += 1) {
         const clip = clips[i];
         if (!clip) continue;
-        const mid = cursor + clipDurationMs(clip) / 2;
+        const mid = cursor + clipTimelineDurationMs(clip) / 2;
         if (targetStart < mid) {
           targetIndex = i;
           break;
         }
-        cursor += clipDurationMs(clip);
+        cursor += clipTimelineDurationMs(clip);
       }
       if (targetIndex !== currentIndex) {
         store.apply({ op: 'move_clip', clipId: id, toIndex: targetIndex });
@@ -108,8 +121,15 @@ export function Timeline({ store }: { store: EditorStore }) {
     }
 
     if (kind === 'trim-left' || kind === 'trim-right') {
-      const nextIn = Math.round(original.inMs + (kind === 'trim-left' ? deltaMs : 0));
-      const nextOut = Math.round(original.outMs + (kind === 'trim-right' ? deltaMs : 0));
+      const location = project.tracks
+        .flatMap((track) => track.clips.map((clip) => ({ track, clip })))
+        .find((entry) => entry.clip.id === id);
+      if (!location) return;
+      const speed = location.clip.speed && location.clip.speed > 0 ? location.clip.speed : 1;
+      // Trim handles move on the timeline; source time advances by speed.
+      const sourceDeltaMs = Math.round(deltaMs * speed);
+      const nextIn = Math.round(original.inMs + (kind === 'trim-left' ? sourceDeltaMs : 0));
+      const nextOut = Math.round(original.outMs + (kind === 'trim-right' ? sourceDeltaMs : 0));
       store.apply({ op: 'trim_clip', clipId: id, inMs: Math.max(0, nextIn), outMs: Math.max(nextIn + 100, nextOut) });
       return;
     }
@@ -127,7 +147,7 @@ export function Timeline({ store }: { store: EditorStore }) {
     const asset = project.assets.find((a) => a.id === clip.assetId);
     const isVideoTrack = track.kind === 'video';
     const startMs = isVideoTrack ? (clipStarts.get(clip.id) ?? 0) : (clip.startMs ?? 0);
-    const durationMs = clipDurationMs(clip);
+    const durationMs = clipTimelineDurationMs(clip);
     const dragging = drag && drag.id === clip.id;
     const shift = dragging ? drag.deltaMs : 0;
     const selected = store.selection.clipId === clip.id;
@@ -252,7 +272,7 @@ export function Timeline({ store }: { store: EditorStore }) {
           onClick={() => {
             const active = [...project.tracks.find((t) => t.kind === 'video')?.clips ?? []].find((clip) => {
               const start = clipStarts.get(clip.id) ?? 0;
-              return playheadMs > start && playheadMs < start + clipDurationMs(clip);
+              return playheadMs > start && playheadMs < start + clipTimelineDurationMs(clip);
             });
             if (active) {
               const start = clipStarts.get(active.id) ?? 0;

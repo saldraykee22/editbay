@@ -30,9 +30,9 @@ const api = {
   saveProject: (content: string, path?: string) => ipcRenderer.invoke('project:save', content, path),
   saveProjectAs: (content: string, defaultName: string) => ipcRenderer.invoke('project:saveAs', content, defaultName),
   secrets: {
-    get: (key: string) => ipcRenderer.invoke('secrets:get', key),
-    set: (key: string, value: string) => ipcRenderer.invoke('secrets:set', key, value),
-    delete: (key: string) => ipcRenderer.invoke('secrets:delete', key),
+    has: (key: string): Promise<boolean> => ipcRenderer.invoke('secrets:has', key),
+    set: (key: string, value: string): Promise<{ encrypted: boolean }> => ipcRenderer.invoke('secrets:set', key, value),
+    delete: (key: string): Promise<void> => ipcRenderer.invoke('secrets:delete', key),
   },
   workspace: {
     root: (): Promise<string> => ipcRenderer.invoke('app:info').then((info: AppInfoDTO) => info.workspaceRoot),
@@ -45,6 +45,7 @@ const api = {
   },
   llm: {
     chat: (req: ChatRequestDTO): Promise<ChatResponseDTO> => ipcRenderer.invoke('llm:chat', req),
+    abort: (requestId: string): Promise<void> => ipcRenderer.invoke('llm:abort', requestId),
     listModels: (providerId: string, apiKey: string, baseUrl?: string) =>
       ipcRenderer.invoke('llm:models', providerId, apiKey, baseUrl),
   },

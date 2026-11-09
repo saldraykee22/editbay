@@ -12,6 +12,8 @@ import type {
 import type {
   AgentEvent,
   AgentRuntime,
+  AgentTurnInput,
+  ChatMessage,
   ChatRequest,
   ChatResponse,
   Provider,
@@ -169,27 +171,32 @@ async function makeHarness(
   };
 }
 
-async function collect(agent: Agent, text: string): Promise<AgentEvent[]> {
+async function collect(agent: Agent, input: string | AgentTurnInput): Promise<AgentEvent[]> {
   const events: AgentEvent[] = [];
-  for await (const event of agent.run({ text })) events.push(event);
+  for await (const event of agent.run(typeof input === 'string' ? { text: input } : input)) {
+    events.push(event);
+  }
   return events;
 }
 
 describe('Agent', () => {
   it('runs a tool-call loop, applies commands and finishes with a message', async () => {
-    const harness = await makeHarness([
-      {
-        text: '',
-        toolCalls: [
-          {
-            id: 'call_1',
-            name: 'apply_commands',
-            arguments: { commands: [{ op: 'trim_clip', clipId: 'clip-1', inMs: 500 }] },
-          },
-        ],
-      },
-      { text: 'Trimmed the intro.', toolCalls: [] },
-    ]);
+    const harness = await makeHarness(
+      [
+        {
+          text: '',
+          toolCalls: [
+            {
+              id: 'call_1',
+              name: 'apply_commands',
+              arguments: { commands: [{ op: 'trim_clip', clipId: 'clip-1', inMs: 500 }] },
+            },
+          ],
+        },
+        { text: 'Trimmed the intro.', toolCalls: [] },
+      ],
+      true,
+    );
     const agent = new Agent({
       runtime: harness.runtime,
       provider: harness.provider,
@@ -334,7 +341,7 @@ describe('Agent', () => {
     expect(events.at(-1)).toEqual({ type: 'done', text: 'Which clip?' });
   });
 
-  it('applies a tool call even when autoApply is off', async () => {
+  it('converts an apply_commands tool call into a proposal when autoApply is off', async () => {
     const harness = await makeHarness(
       [
         {
@@ -347,15 +354,25 @@ describe('Agent', () => {
             },
           ],
         },
-        { text: 'Deleted.', toolCalls: [] },
       ],
       false,
     );
     const agent = new Agent({ runtime: harness.runtime, provider: harness.provider });
 
     const events = await collect(agent, 'delete it');
-    expect(harness.applied).toHaveLength(1);
-    expect(events.some((event) => event.type === 'applied')).toBe(true);
+
+    // The project is untouched: no runtime batch was applied and no event fired.
+    expect(harness.applied).toHaveLength(0);
+    expect(events.some((event) => event.type === 'applied')).toBe(false);
+    const proposal = events.find((event) => event.type === 'proposal');
+    expect(proposal?.type).toBe('proposal');
+    if (proposal?.type === 'proposal') {
+      expect(proposal.commands[0]?.op).toBe('delete_clip');
+    }
+    expect(events.at(-1)?.type).toBe('done');
+    // apply_commands is not advertised to the model in proposal mode.
+    const firstRequest = harness.provider.requests[0];
+    expect(firstRequest?.tools?.map((tool) => tool.name)).not.toContain('apply_commands');
   });
 
   it('maps provider 401 errors to an error event', async () => {
@@ -376,7 +393,8 @@ describe('Agent', () => {
   });
 
   it('reports an empty provider response as EMPTY_RESPONSE', async () => {
-    const harness = await makeHarness([{ text: '   ', toolCalls: [] }]);
+    const empty: ChatResponse = { text: '   ', toolCalls: [] };
+    const harness = await makeHarness([empty, empty, empty]);
     const agent = new Agent({ runtime: harness.runtime, provider: harness.provider });
 
     const events = await collect(agent, 'edit');
@@ -421,5 +439,122 @@ describe('Agent', () => {
 
     const events = await collect(agent, 'hello');
     expect(events.at(-1)).toEqual({ type: 'done', text: 'Hi.' });
+  });
+
+  it('passes the abort signal to the provider and stops before running tools', async () => {
+    const controller = new AbortController();
+    const harness = await makeHarness(() => {
+      // The user hits Stop while the model is thinking; the tool call in the
+      // response must never be executed.
+      controller.abort();
+      return {
+        text: '',
+        toolCalls: [{ id: 'call_read', name: 'read_project', arguments: {} }],
+      };
+    });
+    const agent = new Agent({ runtime: harness.runtime, provider: harness.provider });
+
+    const events = await collect(agent, { text: 'read it', signal: controller.signal });
+
+    expect(harness.provider.requests).toHaveLength(1);
+    expect(harness.provider.requests[0]?.signal).toBe(controller.signal);
+    expect(events.some((event) => event.type === 'tool_start')).toBe(false);
+    expect(events.some((event) => event.type === 'tool_end')).toBe(false);
+    expect(events.find((event) => event.type === 'error')).toMatchObject({
+      type: 'error',
+      message: 'Cancelled.',
+    });
+    expect(events.at(-1)?.type).toBe('done');
+  });
+
+  it('does not call the provider at all when the signal is already aborted', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const harness = await makeHarness([{ text: 'never', toolCalls: [] }]);
+    const agent = new Agent({ runtime: harness.runtime, provider: harness.provider });
+
+    const events = await collect(agent, { text: 'edit', signal: controller.signal });
+
+    expect(harness.provider.requests).toHaveLength(0);
+    expect(events.find((event) => event.type === 'error')).toMatchObject({ message: 'Cancelled.' });
+  });
+
+  it('retries a retryable provider error once and succeeds', async () => {
+    const harness = await makeHarness([
+      new ProviderError('Rate limited (HTTP 429).', {
+        status: 429,
+        code: 'rate_limit',
+        retryable: true,
+        retryAfterMs: 1,
+      }),
+      { text: 'Recovered.', toolCalls: [] },
+    ]);
+    const agent = new Agent({ runtime: harness.runtime, provider: harness.provider });
+
+    const events = await collect(agent, 'edit');
+
+    expect(harness.provider.requests).toHaveLength(2);
+    expect(events.at(-1)).toEqual({ type: 'done', text: 'Recovered.' });
+    expect(events.some((event) => event.type === 'error')).toBe(false);
+  });
+
+  it('gives up after two retries on persistent retryable errors', async () => {
+    const retryable = (): ProviderError =>
+      new ProviderError('Provider unavailable (HTTP 503).', {
+        status: 503,
+        code: 'server',
+        retryable: true,
+        retryAfterMs: 1,
+      });
+    const harness = await makeHarness([retryable(), retryable(), retryable(), retryable()]);
+    const agent = new Agent({ runtime: harness.runtime, provider: harness.provider });
+
+    const events = await collect(agent, 'edit');
+
+    // One initial attempt plus at most two retries.
+    expect(harness.provider.requests).toHaveLength(3);
+    expect(events.find((event) => event.type === 'error')).toMatchObject({ type: 'error' });
+  });
+
+  it('caps a long conversation history while keeping tool call pairs intact', async () => {
+    const history: ChatMessage[] = [];
+    for (let index = 0; index < 32; index += 1) {
+      history.push({ role: 'user', content: `request ${index}` });
+      history.push({
+        role: 'assistant',
+        content: '',
+        toolCalls: [{ id: `call_${index}`, name: 'read_project', arguments: {} }],
+      });
+      history.push({
+        role: 'tool',
+        content: '{"ok":true}',
+        toolCallId: `call_${index}`,
+        name: 'read_project',
+      });
+    }
+    for (let index = 0; index < 4; index += 1) {
+      history.push({ role: index % 2 === 0 ? 'user' : 'assistant', content: `tail ${index}` });
+    }
+    expect(history).toHaveLength(100);
+
+    const harness = await makeHarness([{ text: 'Done.', toolCalls: [] }]);
+    const agent = new Agent({ runtime: harness.runtime, provider: harness.provider });
+
+    await collect(agent, { text: 'continue', history });
+
+    const sent = harness.provider.requests[0]?.messages ?? [];
+    const historyMessages = sent.slice(1, -1);
+    expect(sent[0]?.role).toBe('system');
+    expect(sent.at(-1)).toEqual({ role: 'user', content: 'continue' });
+    expect(historyMessages.length).toBeLessThanOrEqual(24);
+
+    // Every tool result must still follow its assistant tool call.
+    for (let index = 1; index < sent.length; index += 1) {
+      const message = sent[index];
+      if (message?.role !== 'tool') continue;
+      const previous = sent[index - 1];
+      expect(previous?.role).toBe('assistant');
+      expect(previous?.toolCalls?.some((call) => call.id === message.toolCallId)).toBe(true);
+    }
   });
 });

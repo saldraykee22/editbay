@@ -10,6 +10,7 @@ import { availableIds, errorMessage, errorResult, jsonResult } from './shared';
 interface CommandResultView {
   ok: boolean;
   op: string;
+  createdIds?: Record<string, string>;
   error?: string;
   code?: string;
   hint?: string;
@@ -34,6 +35,8 @@ export function registerEditTools(server: McpServer, studio: HeadlessStudio): vo
         'This is the ONLY way to change the project; every batch is undoable with one `undo` call and stops at the ' +
         'first invalid command while keeping the successful prefix. Use ids from get_project (clipId, itemId, assetId, ' +
         'trackId) and effect/transition types from list_effects. Times are integer milliseconds. ' +
+        'Every successful result echoes the ids it created in `createdIds` (clip/text/asset), so you do not need ' +
+        'get_project after add_text, split_clip, duplicate_clip or add_audio. ' +
         'On failure the tool returns isError with the failing op and valid ids; fix the ids and retry. ' +
         'Asset file paths are never accepted or returned here — media enters through import_media.',
       inputSchema: {
@@ -47,7 +50,14 @@ export function registerEditTools(server: McpServer, studio: HeadlessStudio): vo
         if (report.results.some((result) => result.ok)) await studio.flush();
         const durationMs = Date.now() - started;
         const results: CommandResultView[] = report.results.map((result) => {
-          if (result.ok) return { ok: true, op: result.command.op };
+          if (result.ok) {
+            const created = Object.entries(result.createdIds);
+            return {
+              ok: true,
+              op: result.command.op,
+              ...(created.length === 0 ? {} : { createdIds: result.createdIds }),
+            };
+          }
           return {
             ok: false,
             op: result.command.op,

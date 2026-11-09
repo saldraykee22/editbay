@@ -9,6 +9,7 @@
 import { describeChanges } from './changes';
 import { createId } from './ids';
 import {
+  clampTransitionOverlapMs,
   clipTimelineDurationMs,
   findAsset,
   findClip,
@@ -342,11 +343,51 @@ function splitEffects(
   return { first, second };
 }
 
+/**
+ * Keep a track self-consistent after any mutation: no dangling transition on
+ * the last clip, no transition that eats a clip, fades inside the clip, effect
+ * windows inside the clip. Runs after every successful command.
+ */
+function normalizeTrack(track: Track): void {
+  const clips = track.clips;
+  for (let index = 0; index < clips.length; index += 1) {
+    const clip = clips[index];
+    if (!clip) continue;
+    const duration = clipTimelineDurationMs(clip);
+    const next = clips[index + 1];
+
+    if (clip.transitionOut) {
+      if (!next) {
+        delete clip.transitionOut;
+      } else {
+        const clamped = clampTransitionOverlapMs(
+          clip.transitionOut.durationMs,
+          duration,
+          clipTimelineDurationMs(next),
+        );
+        if (clamped < 50) delete clip.transitionOut;
+        else clip.transitionOut.durationMs = clamped;
+      }
+    }
+
+    if (clip.audioFadeInMs !== undefined) clip.audioFadeInMs = Math.min(clip.audioFadeInMs, duration);
+    if (clip.audioFadeOutMs !== undefined) clip.audioFadeOutMs = Math.min(clip.audioFadeOutMs, duration);
+
+    if (clip.effects && clip.effects.length > 0) {
+      clip.effects = clip.effects.filter((effect) => {
+        const start = effect.startMs ?? 0;
+        if (start >= duration) return false;
+        const available = duration - start;
+        if (effect.durationMs !== undefined) effect.durationMs = Math.min(effect.durationMs, available);
+        return (effect.durationMs ?? available) >= 50;
+      });
+    }
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* Command handlers                                                    */
-/* ------------------------------------------------------------------ */
-
-function runCommand(draft: Project, command: EditCommand): CommandOutcome {
+/* ------------------------------------------------------------------ */function runCommand(draft: Project, command: EditCommand): CommandOutcome {
   switch (command.op) {
     case 'import_clip': {
       const asset = findAsset(draft, command.assetId);
@@ -387,7 +428,7 @@ function runCommand(draft: Project, command: EditCommand): CommandOutcome {
       };
       if (track.kind !== 'video') clip.startMs = 0;
 
-      if (track.kind === 'video' && command.index !== undefined) {
+      if (command.index !== undefined) {
         const index = command.index;
         if (!isInteger(index) || index < 0) {
           return failOutcome('invalid', 'index must be a non-negative integer');
@@ -647,6 +688,12 @@ function runCommand(draft: Project, command: EditCommand): CommandOutcome {
         ...effect,
         id: createId('fx'),
       }));
+      if (copy.transitionOut) {
+        copy.transitionOut = { ...copy.transitionOut, id: createId('tr') };
+      }
+      if (location.track.kind !== 'video') {
+        copy.startMs = (copy.startMs ?? 0) + clipTimelineDurationMs(copy);
+      }
       location.track.clips.splice(location.index + 1, 0, copy);
       return okOutcome({ clip: copy.id });
     }
@@ -898,6 +945,9 @@ function runCommand(draft: Project, command: EditCommand): CommandOutcome {
       if (asset.kind !== 'audio' && asset.kind !== 'video') {
         return failOutcome('invalid', 'Audio can only be added from audio or video assets');
       }
+      if (asset.kind === 'video' && asset.hasAudio === false) {
+        return failOutcome('invalid', `Asset '${asset.label}' has no audio track`);
+      }
 
       let track: Track | null;
       if (command.trackId !== undefined) {
@@ -921,6 +971,9 @@ function runCommand(draft: Project, command: EditCommand): CommandOutcome {
       if (inMs < 0) return failOutcome('out_of_range', 'inMs must not be negative');
       if (outMs <= inMs) {
         return failOutcome('invalid', 'outMs must be greater than inMs');
+      }
+      if (outMs - inMs < MIN_CLIP_MS) {
+        return failOutcome('out_of_range', `The audio clip must be at least ${MIN_CLIP_MS}ms`);
       }
       if (asset.durationMs > 0 && outMs > asset.durationMs) {
         return failOutcome(
@@ -1187,6 +1240,8 @@ export function applyCommand(project: Project, command: EditCommand): ApplyResul
     const failure: ApplyFailure = { ok: false, command, error: outcome.error };
     return failure;
   }
+
+  for (const track of draft.tracks) normalizeTrack(track);
 
   if (contentSignature(project) !== contentSignature(draft)) {
     draft.updatedAt = new Date().toISOString();

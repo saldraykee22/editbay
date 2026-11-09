@@ -129,6 +129,23 @@ describe('tool specs', () => {
       expect(spec.parameters).toHaveProperty('type', 'object');
     }
   });
+
+  it('omits apply_commands from the model tools in proposal mode', () => {
+    const auto = buildToolSpecs({ autoApply: true }).map((spec) => spec.name);
+    const proposal = buildToolSpecs({ autoApply: false }).map((spec) => spec.name);
+
+    expect(auto).toContain('apply_commands');
+    expect(proposal).not.toContain('apply_commands');
+    expect(proposal).toContain('read_project');
+  });
+
+  it('never advertises overlay tracks to the model', () => {
+    for (const spec of buildToolSpecs()) {
+      expect(spec.description.toLowerCase()).not.toContain('overlay');
+      expect(JSON.stringify(spec.parameters).toLowerCase()).not.toContain('overlay');
+    }
+    expect(buildToolSpecs().map((spec) => spec.name)).not.toContain('add_track');
+  });
 });
 
 describe('read tools', () => {
@@ -245,6 +262,67 @@ describe('apply_commands', () => {
     );
     expect(result.ok).toBe(false);
     expect(result.summary).toMatch(/string "op"/);
+  });
+
+  it('refuses to mutate the project in proposal mode', async () => {
+    let applied = 0;
+    const runtime = makeRuntime({
+      applyCommands: (commands) => {
+        applied += 1;
+        return {
+          ok: true,
+          project,
+          changes: [],
+          results: commands.map((command) => success(command)),
+        };
+      },
+      settings: { providerId: 'fake', model: 'fake-1', autoApply: false },
+    });
+
+    const result = await executeTool(
+      call('apply_commands', { commands: [{ op: 'delete_clip', clipId: 'clip-1' }] }),
+      { runtime },
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.summary).toMatch(/Proposal mode/);
+    expect(applied).toBe(0);
+  });
+
+  it('reports how many commands were skipped when the batch stops early', async () => {
+    const runtime = makeRuntime({
+      applyCommands: (commands) => ({
+        ok: false,
+        project,
+        changes: ['changed'],
+        results: commands.slice(0, 2).map((command, index) =>
+          index === 0
+            ? success(command)
+            : {
+                ok: false,
+                command: command as EditCommand,
+                error: { code: 'not_found', message: 'clip missing' },
+              },
+        ),
+      }),
+    });
+
+    const result = await executeTool(
+      call('apply_commands', {
+        commands: [
+          { op: 'trim_clip', clipId: 'clip-1', inMs: 0 },
+          { op: 'delete_clip', clipId: 'missing' },
+          { op: 'set_volume', clipId: 'clip-1', volume: 0.5 },
+        ],
+      }),
+      { runtime },
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.summary).toMatch(/skipped/);
+    const data = result.data as { skipped?: number; results: unknown[] };
+    expect(data.skipped).toBe(1);
+    expect(data.results).toHaveLength(2);
   });
 });
 

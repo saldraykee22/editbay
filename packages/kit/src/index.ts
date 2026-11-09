@@ -32,6 +32,7 @@ import {
   type MemoryEntry,
   type Skill,
 } from '@editbay/harness';
+import { assertSafeBrandId } from './id';
 
 export interface StudioOptions {
   /** Path to the project JSON file. Created when missing. */
@@ -91,6 +92,10 @@ export class HeadlessStudio {
   readonly memory: FileMemoryStore;
   private session: EditSession;
   private saveTimer: NodeJS.Timeout | null = null;
+  /** Saves are serialized through this promise chain (no `.tmp` collisions). */
+  private saveChain: Promise<void> = Promise.resolve();
+  /** Monotonic suffix for unique temp files. */
+  private saveSequence = 0;
 
   private constructor(options: Required<Pick<StudioOptions, 'projectPath' | 'workspaceRoot'>> & {
     session: EditSession;
@@ -138,19 +143,40 @@ export class HeadlessStudio {
     return this.session.canRedo;
   }
 
+  /**
+   * Writes the project atomically. Concurrent callers are serialized and each
+   * attempt uses its own temp file, so two overlapping saves can never race on
+   * the same path (and a failed attempt never leaves the project half-written).
+   */
   async save(): Promise<void> {
-    const json = this.session.toJSON();
-    mkdirSync(dirname(this.projectPath), { recursive: true });
-    const temp = `${this.projectPath}.tmp`;
-    await fs.writeFile(temp, json, 'utf8');
-    await fs.rename(temp, this.projectPath);
+    const write = async (): Promise<void> => {
+      const json = this.session.toJSON();
+      mkdirSync(dirname(this.projectPath), { recursive: true });
+      this.saveSequence += 1;
+      const temp = `${this.projectPath}.${process.pid}.${this.saveSequence}.tmp`;
+      try {
+        await fs.writeFile(temp, json, 'utf8');
+        await fs.rename(temp, this.projectPath);
+      } catch (error) {
+        await fs.rm(temp, { force: true }).catch(() => undefined);
+        throw error;
+      }
+    };
+    const next = this.saveChain.then(write, write);
+    // The chain itself must never reject; callers observe their own failure.
+    this.saveChain = next.catch(() => undefined);
+    return next;
   }
 
   /** Debounced save for tool loops that mutate many times in a row. */
   private scheduleSave(): void {
     if (this.saveTimer) clearTimeout(this.saveTimer);
     this.saveTimer = setTimeout(() => {
-      void this.save();
+      this.saveTimer = null;
+      // Fire-and-forget by design: the in-memory project is the truth and the
+      // next flush/save retries. Swallow the rejection so it cannot surface as
+      // an unhandled promise rejection and crash the host process.
+      void this.save().catch(() => undefined);
     }, 150);
   }
 
@@ -222,18 +248,29 @@ export class HeadlessStudio {
         origin: 'imported',
         createdAt: new Date().toISOString(),
       };
-      const add = this.session.apply({ op: 'add_asset', asset });
-      if (!add.ok) throw new Error(`Could not register ${label}: ${add.error.message}`);
-      const clip = this.session.apply({
-        op: 'import_clip',
-        assetId: asset.id,
-        ...(options.trackId ? { trackId: options.trackId } : {}),
-        ...(options.index !== undefined ? { index: options.index } : {}),
-      });
-      if (!clip.ok) throw new Error(`Could not import ${label}: ${clip.error.message}`);
+      const before = this.project;
+      // One batch per file: a single undo removes the asset *and* its clip.
+      const batch = this.session.applyBatch([
+        { op: 'add_asset', asset },
+        {
+          op: 'import_clip',
+          assetId: asset.id,
+          ...(options.trackId ? { trackId: options.trackId } : {}),
+          ...(options.index !== undefined ? { index: options.index } : {}),
+        },
+      ]);
+      if (!batch.ok) {
+        const changed = JSON.stringify(before) !== JSON.stringify(this.project);
+        // Roll the partial batch back so a failed import leaves no orphan asset.
+        if (changed) this.session.undo();
+        const failed = batch.results.find((result) => !result.ok);
+        const reason = failed !== undefined && !failed.ok ? failed.error.message : 'the command batch was rejected';
+        throw new Error(`Could not import ${label}: ${reason}`);
+      }
+      const clipResult = batch.results[1];
       imported.push({
         assetId: asset.id,
-        clipId: clip.createdIds.clip,
+        clipId: clipResult !== undefined && clipResult.ok ? clipResult.createdIds.clip : undefined,
         label,
         kind,
         durationMs: asset.durationMs,
@@ -308,13 +345,17 @@ export class HeadlessStudio {
   }
 
   async brand(id: string): Promise<BrandProfile | null> {
+    assertSafeBrandId(id);
     return this.memory.getBrand(id);
   }
 
   async saveBrand(brand: BrandProfile): Promise<void> {
+    assertSafeBrandId(brand.id);
     await this.memory.saveBrand(brand);
   }
 }
 
 export { effectCatalog };
+export { assertSafeBrandId, isSafeBrandId } from './id';
+export { hasSkillFolders, resolveBuiltinSkillsDir, type BuiltinSkillsLookup } from './skills-path';
 export type { AgentCommand, Project, Skill, MemoryEntry, ProbeResult };

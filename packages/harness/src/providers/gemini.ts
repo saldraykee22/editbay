@@ -181,9 +181,18 @@ function toGeminiContents(messages: ChatMessage[]): GeminiContents {
     }
     if (message.role === 'assistant') {
       const parts: Array<Record<string, unknown>> = [];
+      // Thinking models require their original thought parts back verbatim.
+      if (message.thoughts !== undefined && message.thoughts !== '') {
+        parts.push({ text: message.thoughts, thought: true });
+      }
       if (message.content !== '') parts.push({ text: message.content });
       for (const call of message.toolCalls ?? []) {
-        parts.push({ functionCall: { name: call.name, args: call.arguments } });
+        parts.push({
+          functionCall: { name: call.name, args: call.arguments },
+          ...(call.thoughtSignature !== undefined
+            ? { thoughtSignature: call.thoughtSignature }
+            : {}),
+        });
       }
       push('model', parts);
       continue;
@@ -221,25 +230,35 @@ function parseGeminiResponse(payload: unknown, label: string): ChatResponse {
   const content = asRecord(candidate?.content);
 
   const texts: string[] = [];
+  const thoughts: string[] = [];
   const toolCalls: ToolCall[] = [];
   for (const [index, rawPart] of asArray(content?.parts).entries()) {
     const part = asRecord(rawPart);
     const text = asString(part?.text);
-    if (text !== undefined) texts.push(text);
+    if (text !== undefined) {
+      // `thought: true` marks internal reasoning; keep it out of the answer
+      // text but preserve it for the next request.
+      if (part?.thought === true) thoughts.push(text);
+      else texts.push(text);
+    }
 
     const functionCall = asRecord(part?.functionCall);
     const name = asString(functionCall?.name);
     if (name) {
+      const signature = asString(part?.thoughtSignature);
       toolCalls.push({
         id: asString(functionCall?.id) ?? `call_${index}`,
         name,
         arguments: parseArguments(functionCall?.args),
+        ...(signature !== undefined ? { thoughtSignature: signature } : {}),
       });
     }
   }
 
   const text = texts.join('');
-  if (text === '' && toolCalls.length === 0) throw emptyResponseError(label);
+  if (text === '' && toolCalls.length === 0 && thoughts.length === 0) {
+    throw emptyResponseError(label);
+  }
 
   const usage = parseUsage(record.usageMetadata);
   const finishReason = asString(candidate?.finishReason);
@@ -247,6 +266,7 @@ function parseGeminiResponse(payload: unknown, label: string): ChatResponse {
   return {
     text,
     toolCalls,
+    ...(thoughts.length > 0 ? { thoughts: thoughts.join('') } : {}),
     ...(usage !== undefined ? { usage } : {}),
     ...(finishReason !== undefined ? { finishReason } : {}),
   };

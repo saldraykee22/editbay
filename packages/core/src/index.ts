@@ -8,13 +8,18 @@ export { createEmptyProject, validateProject } from './project';
 
 export {
   audioTrack,
+  clipStartMsOnTrack,
   clipTimelineDurationMs,
+  clampTransitionOverlapMs,
   findAsset,
   findClip,
   findTextItem,
   mainVideoTrack,
+  projectDurationMs,
   textTrack,
   timelineDurationMs,
+  trackDurationMs,
+  transitionOverlapMs,
   videoClipStartMs,
 } from './timeline';
 export type { ClipLocation, TextLocation } from './timeline';

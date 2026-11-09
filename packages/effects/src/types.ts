@@ -2,6 +2,8 @@ import type { EffectParam } from '@editbay/core';
 
 export type { EffectParam };
 
+export type EffectCategory = 'motion' | 'color' | 'texture' | 'audio';
+
 export interface EffectParamSpec {
   key: string;
   label: string;
@@ -58,7 +60,7 @@ export interface FfmpegEffectMeta {
 export interface EffectDefinition {
   id: string;
   name: string;
-  category: 'motion' | 'color' | 'texture' | 'audio';
+  category: EffectCategory;
   description: string;
   params: EffectParamSpec[];
   builtin: boolean;

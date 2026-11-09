@@ -39,7 +39,7 @@ export const AGENT_TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'apply_commands',
     description:
-      'Apply one or more editing commands atomically. Use only ids that exist in the project. Returns a per-command result list; a failing command does not stop the others. This tool is the only way to change the project.',
+      'Apply one or more editing commands in order. Use only ids that exist in the project. Commands stop at the first failure: earlier commands in the batch stay applied and the rest are skipped. Returns a per-command result list plus a skipped count. This tool is the only way to change the project.',
     parameters: {
       type: 'object',
       properties: {
@@ -144,8 +144,18 @@ export const AGENT_TOOL_SPECS: readonly ToolSpec[] = [
   },
 ];
 
-export function buildToolSpecs(): ToolSpec[] {
-  return AGENT_TOOL_SPECS.map((spec) => ({ ...spec }));
+export interface ToolSpecOptions {
+  /**
+   * When false (proposal mode), `apply_commands` is omitted because the model
+   * must not be able to change the project without user approval.
+   */
+  autoApply?: boolean;
+}
+
+export function buildToolSpecs(options: ToolSpecOptions = {}): ToolSpec[] {
+  return AGENT_TOOL_SPECS.filter(
+    (spec) => options.autoApply !== false || spec.name !== 'apply_commands',
+  ).map((spec) => ({ ...spec }));
 }
 
 export function createToolExecutor(
@@ -219,12 +229,19 @@ function applyCommands(
   context: ToolContext,
 ): ToolResult {
   const runtime = requireRuntime(context);
+  // Proposal mode is enforced here as well as in the tool schema: even a model
+  // that emits a stale tool call cannot mutate the project.
+  if (runtime.settings.autoApply === false) {
+    return failure(
+      'Proposal mode is on (autoApply is false): apply_commands cannot change the project. Return the commands as a JSON proposal instead.',
+    );
+  }
   const rawCommands = input.commands;
   if (!Array.isArray(rawCommands)) {
     return failure('apply_commands expects { commands: [...] }');
   }
   if (rawCommands.length === 0) {
-    return { ok: true, summary: 'No commands to apply.', data: { ok: true, results: [] } };
+    return { ok: true, summary: 'No commands to apply.', data: { ok: true, results: [], skipped: 0 } };
   }
 
   const commands: AgentCommand[] = [];
@@ -250,14 +267,20 @@ function applyCommands(
   );
   const failed = perCommand.filter((result) => !result.ok).length;
   const applied = perCommand.length - failed;
+  // The core batch stops at the first failure and keeps the successful prefix,
+  // so any command after the failure never ran.
+  const skipped = Math.max(0, commands.length - perCommand.length);
+
+  const summary = batch.ok
+    ? `Applied ${applied} command${applied === 1 ? '' : 's'}.`
+    : skipped > 0
+      ? `Applied ${applied} of ${commands.length} commands; ${failed} failed and ${skipped} skipped because the batch stops at the first failure.`
+      : `Applied ${applied} of ${perCommand.length} commands; ${failed} failed.`;
 
   return {
     ok: batch.ok,
-    summary:
-      failed === 0
-        ? `Applied ${applied} command${applied === 1 ? '' : 's'}.`
-        : `Applied ${applied} of ${perCommand.length} commands; ${failed} failed.`,
-    data: { ok: batch.ok, results: perCommand, changes: batch.changes },
+    summary,
+    data: { ok: batch.ok, results: perCommand, changes: batch.changes, skipped },
     commands,
     applied: batch.results,
   };

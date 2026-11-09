@@ -1,5 +1,14 @@
 import { app, BrowserWindow, dialog, ipcMain, net, protocol, safeStorage, shell } from 'electron';
-import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  cpSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  writeFileSync,
+} from 'node:fs';
 import { extname, join, normalize, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { exportProject, probeMedia, getFfmpegInfo, extractFrameDataUrl } from '@editbay/engine';
@@ -15,7 +24,7 @@ import type {
 protocol.registerSchemesAsPrivileged([
   {
     scheme: 'editbay-media',
-    privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, bypassCSP: false },
+    privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, stream: true, bypassCSP: false },
   },
 ]);
 
@@ -52,6 +61,141 @@ function safeWorkspacePath(rel: string): string {
   return target;
 }
 
+/* ------------------------------------------------------------------ */
+/* Local media allowlist                                               */
+/* ------------------------------------------------------------------ */
+
+/**
+ * `editbay-media://` used to serve any file on disk. Only paths the user
+ * explicitly imported/opened (or that belong to a project they opened) are
+ * served now. The list survives restarts so a reopened recent project still
+ * previews without re-importing.
+ */
+const MAX_ALLOWLIST_ENTRIES = 4000;
+let mediaAllowlist: Set<string> | null = null;
+
+function normalizeFsPath(path: string): string {
+  const resolved = resolve(path);
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
+function getMediaAllowlist(): Set<string> {
+  if (mediaAllowlist) return mediaAllowlist;
+  const allowlist = new Set<string>();
+  const file = userDataFile('media-allowlist.json');
+  try {
+    if (existsSync(file)) {
+      const parsed: unknown = JSON.parse(readFileSync(file, 'utf8'));
+      if (Array.isArray(parsed)) {
+        for (const entry of parsed) {
+          if (typeof entry === 'string' && entry !== '') allowlist.add(normalizeFsPath(entry));
+        }
+      }
+    }
+  } catch {
+    // A corrupt allowlist only means the user re-imports media.
+  }
+  mediaAllowlist = allowlist;
+  return allowlist;
+}
+
+function persistMediaAllowlist(allowlist: Set<string>): void {
+  const entries = [...allowlist];
+  const trimmed = entries.length > MAX_ALLOWLIST_ENTRIES ? entries.slice(-MAX_ALLOWLIST_ENTRIES) : entries;
+  try {
+    writeFileSync(userDataFile('media-allowlist.json'), JSON.stringify(trimmed, null, 2), 'utf8');
+  } catch {
+    // Persistence is best effort; the in-memory allowlist still works.
+  }
+}
+
+function authorizeMedia(paths: Array<string | null | undefined>): void {
+  const allowlist = getMediaAllowlist();
+  let changed = false;
+  for (const path of paths) {
+    if (!path || path.trim() === '') continue;
+    const normalized = normalizeFsPath(path);
+    if (allowlist.has(normalized)) continue;
+    allowlist.add(normalized);
+    changed = true;
+  }
+  if (changed) persistMediaAllowlist(allowlist);
+}
+
+function isMediaAllowed(path: string): boolean {
+  if (path.trim() === '') return false;
+  return getMediaAllowlist().has(normalizeFsPath(path));
+}
+
+function assertMediaAllowed(path: string): void {
+  if (!isMediaAllowed(path)) throw new Error('Media path was not authorized by an import dialog');
+}
+
+/* ------------------------------------------------------------------ */
+/* Project path authorization                                          */
+/* ------------------------------------------------------------------ */
+
+/** Unknown local paths must come from open/save dialogs before they are written. */
+const authorizedProjectPaths = new Set<string>();
+const authorizedExportPaths = new Set<string>();
+
+function authorizeProjectPath(path: string): void {
+  authorizedProjectPaths.add(normalizeFsPath(path));
+}
+
+function isProjectPathAuthorized(path: string): boolean {
+  return authorizedProjectPaths.has(normalizeFsPath(path));
+}
+
+const MEDIA_EXTENSIONS = new Set([
+  '.mp4',
+  '.mov',
+  '.mkv',
+  '.webm',
+  '.avi',
+  '.m4v',
+  '.mp3',
+  '.wav',
+  '.m4a',
+  '.aac',
+  '.flac',
+  '.png',
+  '.jpg',
+  '.jpeg',
+  '.webp',
+  '.gif',
+  '.bmp',
+  '.svg',
+]);
+
+function looksLikeAbsolutePath(value: string): boolean {
+  return /^[A-Za-z]:[\\/]/.test(value) || value.startsWith('/') || value.startsWith('\\\\');
+}
+
+/** A project may only authorize media files, never arbitrary documents. */
+function looksLikeMediaPath(value: string): boolean {
+  return looksLikeAbsolutePath(value) && MEDIA_EXTENSIONS.has(extname(value).toLowerCase());
+}
+
+/** Media referenced by a project the user opened stays previewable. */
+function authorizeProjectAssets(content: string): void {
+  try {
+    const parsed: unknown = JSON.parse(content);
+    if (!parsed || typeof parsed !== 'object') return;
+    const assets = (parsed as { assets?: unknown }).assets;
+    if (!Array.isArray(assets)) return;
+    const paths: string[] = [];
+    for (const asset of assets) {
+      if (!asset || typeof asset !== 'object') continue;
+      const uri = (asset as { uri?: unknown }).uri;
+      if (typeof uri === 'string' && looksLikeMediaPath(uri)) paths.push(uri);
+    }
+    authorizeMedia(paths);
+  } catch {
+    // Invalid project JSON is rejected later by the renderer parser.
+  }
+}
+
 function readSecrets(): Record<string, string> {
   const file = userDataFile('secrets.json');
   if (!existsSync(file)) return {};
@@ -62,12 +206,12 @@ function readSecrets(): Record<string, string> {
       if (safeStorage.isEncryptionAvailable()) {
         try {
           out[key] = safeStorage.decryptString(Buffer.from(value, 'base64'));
+          continue;
         } catch {
-          // ignore unreadable entries
+          // Plaintext entry written before the OS keychain was available.
         }
-      } else {
-        out[key] = value;
       }
+      out[key] = value;
     }
     return out;
   } catch {
@@ -75,15 +219,20 @@ function readSecrets(): Record<string, string> {
   }
 }
 
-function writeSecrets(secrets: Record<string, string>): void {
+function writeSecrets(secrets: Record<string, string>): { encrypted: boolean } {
+  const encrypted = safeStorage.isEncryptionAvailable();
   const payload: Record<string, string> = {};
   for (const [key, value] of Object.entries(secrets)) {
-    payload[key] = safeStorage.isEncryptionAvailable()
-      ? safeStorage.encryptString(value).toString('base64')
-      : value;
+    payload[key] = encrypted ? safeStorage.encryptString(value).toString('base64') : value;
   }
   const file = userDataFile('secrets.json');
-  writeFileSync(file, JSON.stringify(payload, null, 2), 'utf8');
+  writeFileSync(file, JSON.stringify(payload, null, 2), { encoding: 'utf8', mode: 0o600 });
+  try {
+    chmodSync(file, 0o600);
+  } catch {
+    // Windows ignores POSIX modes; the user profile ACL still applies.
+  }
+  return { encrypted };
 }
 
 function kindFromPath(path: string): PickedMedia['kind'] {
@@ -94,6 +243,7 @@ function kindFromPath(path: string): PickedMedia['kind'] {
 }
 
 async function probePicked(path: string): Promise<PickedMedia> {
+  authorizeMedia([path]);
   const label = path.split(/[\\/]/).pop() ?? path;
   const base: PickedMedia = { path, label, kind: kindFromPath(path) };
   try {
@@ -147,6 +297,20 @@ function fakeChatResponse(req: ChatRequestDTO): ChatResponseDTO {
       },
     ],
   };
+}
+
+function authorizeWorkspaceRecoveryAssets(): void {
+  try {
+    const file = join(workspaceRoot(), 'projects', 'current.json');
+    if (!existsSync(file)) return;
+    const parsed = JSON.parse(readFileSync(file, 'utf8')) as { assets?: Array<{ uri?: unknown }> };
+    const uris = (parsed.assets ?? [])
+      .map((asset) => (typeof asset?.uri === 'string' ? asset.uri : null))
+      .filter((uri): uri is string => uri !== null);
+    if (uris.length > 0) authorizeMedia(uris);
+  } catch {
+    // A corrupt recovery file is handled by the renderer; it must not block startup.
+  }
 }
 
 function createWindow(): BrowserWindow {  const win = new BrowserWindow({
@@ -229,26 +393,45 @@ function registerIpc(): void {
       properties: ['openFile'],
       filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp', 'svg'] }],
     });
-    return result.canceled ? null : (result.filePaths[0] ?? null);
+    const path = result.canceled ? null : (result.filePaths[0] ?? null);
+    if (path) authorizeMedia([path]);
+    return path;
   });
 
-  ipcMain.handle('media:probe', async (_e, path: string) => probeMedia(path));
-  ipcMain.handle('media:thumbnail', async (_e, path: string, atMs = 0, width = 320) =>
-    extractFrameDataUrl(path, atMs, width),
-  );
+  ipcMain.handle('media:probe', async (_e, path: string) => {
+    assertMediaAllowed(path);
+    return probeMedia(path);
+  });
+  ipcMain.handle('media:thumbnail', async (_e, path: string, atMs = 0, width = 320) => {
+    assertMediaAllowed(path);
+    return extractFrameDataUrl(path, atMs, width);
+  });
 
   ipcMain.handle('dialog:saveVideo', async (_e, defaultName: string): Promise<string | null> => {
-    if (process.env['EDITBAY_TEST_EXPORT']) return process.env['EDITBAY_TEST_EXPORT'];
+    if (process.env['EDITBAY_TEST_EXPORT']) {
+      const testPath = process.env['EDITBAY_TEST_EXPORT'];
+      authorizedExportPaths.add(normalizeFsPath(testPath));
+      authorizeMedia([testPath]);
+      return testPath;
+    }
     const result = await dialog.showSaveDialog({
       title: 'Export video',
       defaultPath: join(app.getPath('videos'), defaultName),
       filters: [{ name: 'MP4 video', extensions: ['mp4'] }],
     });
-    return result.canceled ? null : (result.filePath ?? null);
+    const path = result.canceled ? null : (result.filePath ?? null);
+    if (path) {
+      authorizedExportPaths.add(normalizeFsPath(path));
+      authorizeMedia([path]);
+    }
+    return path;
   });
 
   ipcMain.handle('export:video', async (event, req: ExportRequestDTO) => {
     const started = Date.now();
+    if (!authorizedExportPaths.has(normalizeFsPath(req.outPath))) {
+      return { ok: false, error: 'Export path was not authorized by a save dialog', elapsedMs: 0 };
+    }
     try {
       const result = await exportProject(req.project, {
         outPath: req.outPath,
@@ -263,6 +446,13 @@ function registerIpc(): void {
   });
 
   ipcMain.handle('project:open', async () => {
+    const testPath = process.env['EDITBAY_TEST_OPEN_PROJECT'];
+    if (testPath) {
+      const content = readFileSync(testPath, 'utf8');
+      authorizeProjectPath(testPath);
+      authorizeProjectAssets(content);
+      return { path: testPath, content };
+    }
     const result = await dialog.showOpenDialog({
       title: 'Open project',
       properties: ['openFile'],
@@ -270,11 +460,17 @@ function registerIpc(): void {
     });
     if (result.canceled || !result.filePaths[0]) return null;
     const path = result.filePaths[0];
-    return { path, content: readFileSync(path, 'utf8') };
+    const content = readFileSync(path, 'utf8');
+    authorizeProjectPath(path);
+    authorizeProjectAssets(content);
+    return { path, content };
   });
 
   ipcMain.handle('project:save', async (_e, content: string, path?: string): Promise<string | null> => {
     if (!path) return null;
+    if (!isProjectPathAuthorized(path)) {
+      throw new Error('Project path was not authorized by an open or save dialog');
+    }
     const tmp = `${path}.tmp`;
     writeFileSync(tmp, content, 'utf8');
     renameSync(tmp, path);
@@ -289,14 +485,18 @@ function registerIpc(): void {
     });
     if (result.canceled || !result.filePath) return null;
     writeFileSync(result.filePath, content, 'utf8');
+    authorizeProjectPath(result.filePath);
     return result.filePath;
   });
 
-  ipcMain.handle('secrets:get', async (_e, key: string): Promise<string | null> => readSecrets()[key] ?? null);
-  ipcMain.handle('secrets:set', async (_e, key: string, value: string): Promise<void> => {
+  ipcMain.handle('secrets:has', async (_e, key: string): Promise<boolean> => {
+    const value = readSecrets()[key];
+    return typeof value === 'string' && value !== '';
+  });
+  ipcMain.handle('secrets:set', async (_e, key: string, value: string): Promise<{ encrypted: boolean }> => {
     const secrets = readSecrets();
     secrets[key] = value;
-    writeSecrets(secrets);
+    return writeSecrets(secrets);
   });
   ipcMain.handle('secrets:delete', async (_e, key: string): Promise<void> => {
     const secrets = readSecrets();
@@ -338,10 +538,18 @@ function registerIpc(): void {
   });
   ipcMain.handle('workspace:exists', async (_e, rel: string): Promise<boolean> => existsSync(safeWorkspacePath(rel)));
 
+  const activeLlmRequests = new Map<string, AbortController>();
+
+  ipcMain.handle('llm:abort', async (_e, requestId: string): Promise<void> => {
+    activeLlmRequests.get(requestId)?.abort();
+  });
+
   ipcMain.handle('llm:chat', async (_e, req: ChatRequestDTO): Promise<ChatResponseDTO> => {
     if (process.env['EDITBAY_FAKE_LLM'] === '1') {
       return fakeChatResponse(req);
     }
+    const controller = new AbortController();
+    if (req.requestId) activeLlmRequests.set(req.requestId, controller);
     try {
       const provider = getProvider(req.providerId);
       if (!provider) return { text: '', toolCalls: [], error: `Unknown provider: ${req.providerId}` };
@@ -357,12 +565,15 @@ function registerIpc(): void {
           tools: req.tools,
           temperature: req.temperature,
           maxTokens: req.maxTokens,
+          signal: controller.signal,
         },
         { apiKey, baseUrl: req.baseUrl ?? readSecrets()[`provider.${req.providerId}.baseUrl`] },
       );
       return { text: response.text, toolCalls: response.toolCalls, usage: response.usage };
     } catch (error) {
       return { text: '', toolCalls: [], error: error instanceof Error ? error.message : String(error) };
+    } finally {
+      if (req.requestId) activeLlmRequests.delete(req.requestId);
     }
   });
 
@@ -419,11 +630,18 @@ if (!app.requestSingleInstanceLock()) {
       const url = new URL(request.url);
       const encoded = url.pathname.replace(/^\//, '');
       const filePath = decodeURIComponent(encoded);
+      if (!isMediaAllowed(filePath)) {
+        return new Response('Forbidden', {
+          status: 403,
+          headers: { 'content-type': 'text/plain', 'access-control-allow-origin': '*' },
+        });
+      }
       return net.fetch(pathToFileURL(filePath).toString());
     });
 
     registerIpc();
     seedSkills();
+    authorizeWorkspaceRecoveryAssets();
     createWindow();
 
     app.on('activate', () => {

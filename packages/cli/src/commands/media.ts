@@ -2,6 +2,7 @@
  * Media ingestion: `import` and `probe`.
  */
 
+import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { ImportResult } from '@editbay/kit';
 import {
@@ -30,16 +31,28 @@ export async function runImport(ctx: CliContext): Promise<number> {
   const entries: ImportedEntry[] = [];
   const paths = inputs.map((input) => resolve(input));
 
-  for (let offset = 0; offset < paths.length; offset += 1) {
-    const path = paths[offset];
-    if (path === undefined) continue;
-    // Increment the insert index so a multi-file import keeps its file order.
-    const index = baseIndex === undefined ? undefined : baseIndex + offset;
-    const imported = await studio.importMedia([path], {
-      ...(trackId === undefined ? {} : { trackId }),
-      ...(index === undefined ? {} : { index }),
-    });
-    for (const result of imported) entries.push({ ...result, path });
+  // Validate the whole batch before touching the project: a typo in the last
+  // file must not leave the earlier files imported and saved.
+  for (const path of paths) {
+    if (!existsSync(path)) throw new CliError(`Media file not found: ${path}`);
+  }
+
+  try {
+    for (let offset = 0; offset < paths.length; offset += 1) {
+      const path = paths[offset];
+      if (path === undefined) continue;
+      // Increment the insert index so a multi-file import keeps its file order.
+      const index = baseIndex === undefined ? undefined : baseIndex + offset;
+      const imported = await studio.importMedia([path], {
+        ...(trackId === undefined ? {} : { trackId }),
+        ...(index === undefined ? {} : { index }),
+      });
+      for (const result of imported) entries.push({ ...result, path });
+    }
+  } catch (error) {
+    // Files already imported are on disk; journal them so `undo` still works.
+    if (entries.length > 0) await recordHistory(ctx, before);
+    throw error;
   }
 
   if (entries.length > 0) await recordHistory(ctx, before);

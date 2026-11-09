@@ -17,6 +17,11 @@ export interface ToolCall {
   id: string;
   name: string;
   arguments: Record<string, unknown>;
+  /**
+   * Gemini thinking-model signature attached to a `functionCall` part. It must
+   * be echoed back on the next request or the API rejects the turn with 400.
+   */
+  thoughtSignature?: string;
 }
 
 export type ChatRole = 'system' | 'user' | 'assistant' | 'tool';
@@ -27,6 +32,8 @@ export interface ChatMessage {
   toolCallId?: string;
   toolCalls?: ToolCall[];
   name?: string;
+  /** Raw reasoning text from a thinking model (Gemini `thought` parts). */
+  thoughts?: string;
 }
 
 export interface ChatRequest {
@@ -48,6 +55,8 @@ export interface ChatResponse {
   toolCalls: ToolCall[];
   usage?: ChatUsage;
   finishReason?: string;
+  /** Raw reasoning text from a thinking model (Gemini `thought` parts). */
+  thoughts?: string;
 }
 
 export interface ModelInfo {
@@ -203,6 +212,13 @@ export interface AgentTurnInput {
   /** Optional UI context: selected clip, playhead, etc. */
   selection?: { clipId?: string; itemId?: string; playheadMs?: number };
   attachments?: Array<{ label: string; kind: string; assetId?: string }>;
+  /**
+   * Earlier conversation messages (without the system prompt). Capped by the
+   * agent to keep provider context windows bounded.
+   */
+  history?: ChatMessage[];
+  /** Cancels the turn, including the in-flight provider request. */
+  signal?: AbortSignal;
 }
 
 export interface Receipt {

@@ -8,8 +8,21 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { BrandProfile } from '@editbay/harness';
+import { isSafeBrandId } from '@editbay/kit';
 import type { HeadlessStudio } from '@editbay/kit';
 import { errorMessage, errorResult, jsonResult } from './shared';
+
+/**
+ * Brand ids become directory names (`brands/<id>/identity.md`). Reject anything
+ * that could traverse out of the workspace before it reaches the file store.
+ */
+function invalidBrandId(id: string): ReturnType<typeof errorResult> | null {
+  if (isSafeBrandId(id)) return null;
+  return errorResult(
+    `Invalid brand id: "${id}". Use a short lowercase slug with letters, digits, dash or underscore ` +
+      '(no slashes and no ".."), for example "acme".',
+  );
+}
 
 export function registerKnowledgeTools(server: McpServer, studio: HeadlessStudio): void {
   server.registerTool(
@@ -189,10 +202,12 @@ export function registerKnowledgeTools(server: McpServer, studio: HeadlessStudio
         '"our brand", "the client" or asks for on-brand styling, then use the colors/fonts in add_text styles. ' +
         'Id is a brand id; list valid brands by calling it with an unknown id.',
       inputSchema: {
-        id: z.string().min(1).describe('Brand id, e.g. "acme".'),
+        id: z.string().min(1).describe('Brand id, e.g. "acme" (a slug; no slashes).'),
       },
     },
     async (args) => {
+      const invalid = invalidBrandId(args.id);
+      if (invalid) return invalid;
       try {
         const brand = await studio.brand(args.id);
         if (!brand) {
@@ -225,7 +240,7 @@ export function registerKnowledgeTools(server: McpServer, studio: HeadlessStudio
         'or corrects brand rules. Then reuse get_brand in later edits so styling stays on-brand. ' +
         'Id must be a short slug; an existing logo path is preserved.',
       inputSchema: {
-        id: z.string().min(1).describe('Slug id, e.g. "acme". Reuse it to update.'),
+        id: z.string().min(1).describe('Slug id, e.g. "acme" (no slashes). Reuse it to update.'),
         name: z.string().min(1).describe('Brand display name.'),
         body: z.string().describe('Markdown identity: tone, audience, do/don\'t.'),
         colors: z.array(z.string()).optional().describe('Palette as hex strings, e.g. ["#0E1F1A", "#46E0B0"].'),
@@ -233,6 +248,8 @@ export function registerKnowledgeTools(server: McpServer, studio: HeadlessStudio
       },
     },
     async (args) => {
+      const invalid = invalidBrandId(args.id);
+      if (invalid) return invalid;
       try {
         const existing = await studio.brand(args.id);
         const brand: BrandProfile = {

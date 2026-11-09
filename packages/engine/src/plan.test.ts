@@ -1,9 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_TEXT_STYLE } from '@editbay/core';
 import type { Asset, AssetKind, Clip, Project, TextItem, Track } from '@editbay/core';
-import { buildRenderPlan, RenderError, atempoChain, QUALITY_PRESETS } from './plan';
+import {
+  buildRenderPlan,
+  RenderError,
+  atempoChain,
+  QUALITY_PRESETS,
+  splitFilterChain,
+  withEnableWindow,
+} from './plan';
 import type { EngineRenderPlan, RenderPlanOptions } from './plan';
-import { clipDurationMs, sequentialStarts, timelineOf } from './timing';
+import { clipDurationMs, projectDurationMs, sequentialStarts, timelineOf } from './timing';
 
 /* ------------------------------------------------------------------ */
 /* Fixtures                                                           */
@@ -72,6 +79,8 @@ function planFor(project: Project, overrides: Partial<RenderPlanOptions> = {}): 
     assetPaths,
     outPath: 'C:/out/final.mp4',
     textFileDir: 'C:/tmp/editbay-text',
+    // Pin the encoder so unit tests never depend on the host binary.
+    videoEncoder: 'libx264',
     ...overrides,
   });
 }
@@ -123,6 +132,22 @@ describe('timing', () => {
     });
     expect(planFor(project).durationMs).toBe(5000);
   });
+
+  it('ignores muted audio tracks when measuring project duration', () => {
+    const project = makeProject({
+      clips: [makeClip('c1', 'a1', { outMs: 5000 })],
+      audioClips: [makeClip('c2', 'a3', { outMs: 60_000 })],
+      assets: [makeAsset('a1'), makeAsset('a3', 'audio')],
+    });
+    expect(projectDurationMs(project)).toBe(60_000);
+
+    const audioTrack = project.tracks.find((track) => track.kind === 'audio');
+    expect(audioTrack).toBeDefined();
+    if (audioTrack) audioTrack.muted = true;
+
+    expect(projectDurationMs(project)).toBe(5000);
+    expect(planFor(project).durationMs).toBe(5000);
+  });
 });
 
 /* ------------------------------------------------------------------ */
@@ -135,7 +160,11 @@ describe('buildRenderPlan: video', () => {
       clips: [makeClip('c1', 'a1', { inMs: 1000, outMs: 3000 })],
     });
     const plan = planFor(project);
-    expect(plan.filterGraph).toContain('trim=start=1.000:end=3.000');
+    // Input-level seek (F-23) and a zero-based filter trim.
+    expect(plan.args).toEqual(
+      expect.arrayContaining(['-ss', '1.000', '-to', '3.000', '-i', 'C:/media/a1.mp4']),
+    );
+    expect(plan.filterGraph).toContain('trim=start=0.000:end=2.000');
     expect(plan.filterGraph).toContain('setpts=PTS-STARTPTS');
     expect(plan.filterGraph).not.toContain('setpts=(PTS-STARTPTS)/');
     expect(plan.filterGraph).toContain('fps=30');
@@ -204,8 +233,10 @@ describe('buildRenderPlan: video', () => {
       ],
     });
     const plan = planFor(project);
-    expect(plan.filterGraph).toContain('duration=0.199');
-    expect(plan.durationMs).toBe(201);
+    // @editbay/core clamps to floor(min(prev, next) / 2) = 100 ms.
+    expect(plan.filterGraph).toContain('duration=0.100');
+    expect(plan.filterGraph).toContain('offset=0.100');
+    expect(plan.durationMs).toBe(300);
     expect(plan.warnings.some((warning) => warning.includes('clips allow'))).toBe(false);
   });
 
@@ -245,11 +276,27 @@ describe('buildRenderPlan: video', () => {
         ],
       }),
     );
-    expect(plan.filterGraph).toContain('scale=iw*1.5:ih*1.5');
+    expect(plan.filterGraph).toContain(
+      "scale=w='max(2,trunc(iw*1.5/2)*2)':h='max(2,trunc(ih*1.5/2)*2)'",
+    );
     expect(plan.filterGraph).toContain('rotate=0.174533');
     expect(plan.filterGraph).toContain('colorchannelmixer=aa=0.5');
     expect(plan.filterGraph).toContain('color=c=black:s=1080x1920');
     expect(plan.filterGraph).toContain('overlay=x=(main_w-overlay_w)/2+108:y=(main_h-overlay_h)/2+-96');
+  });
+
+  it('converts to rgba before scaling and rounds odd scaled sizes to even', () => {
+    const plan = planFor(
+      makeProject({
+        clips: [makeClip('c1', 'a1', { transform: { x: 0, y: 0, scale: 0.501, rotation: 0, opacity: 1 } })],
+      }),
+    );
+    const layer = plan.filterGraph.split(';').find((line) => line.includes('scale=w='));
+    expect(layer).toBeDefined();
+    const order = layer?.indexOf('format=rgba') ?? -1;
+    const scale = layer?.indexOf("scale=w='max(2,trunc(iw*0.501/2)*2)'") ?? -1;
+    expect(order).toBeGreaterThanOrEqual(0);
+    expect(scale).toBeGreaterThan(order);
   });
 
   it('resolves one input per clip in order', () => {
@@ -261,6 +308,26 @@ describe('buildRenderPlan: video', () => {
     const plan = planFor(project);
     expect(plan.inputs).toEqual(['C:/media/a1.mp4', 'C:/media/a2.mp4', 'C:/media/a3.m4a']);
     expect(plan.args.filter((arg) => arg === '-i')).toHaveLength(3);
+  });
+
+  it('seeks split clips at the input and trims from zero', () => {
+    const plan = planFor(makeProject({ clips: [makeClip('c1', 'a1', { inMs: 60_000, outMs: 65_000 })] }));
+    const inputAt = plan.args.indexOf('-i');
+    expect(inputAt).toBeGreaterThan(0);
+    expect(plan.args.slice(0, inputAt)).toEqual(expect.arrayContaining(['-ss', '60.000', '-to', '65.000']));
+    expect(plan.args.indexOf('-ss')).toBeLessThan(inputAt);
+    expect(plan.filterGraph).toContain('trim=start=0.000:end=5.000');
+    expect(plan.durationMs).toBe(5000);
+  });
+
+  it('keeps input-level seeking for retimed clips so A/V stay in sync', () => {
+    const plan = planFor(
+      makeProject({ clips: [makeClip('c1', 'a1', { inMs: 60_000, outMs: 65_000, speed: 2 })] }),
+    );
+    expect(plan.args).toEqual(expect.arrayContaining(['-ss', '60.000', '-to', '65.000']));
+    expect(plan.filterGraph).toContain('setpts=(PTS-STARTPTS)/2');
+    expect(plan.filterGraph).toContain('atempo=2');
+    expect(plan.durationMs).toBe(2500);
   });
 });
 
@@ -404,6 +471,21 @@ describe('buildRenderPlan: effects', () => {
     expect(plan.warnings.some((warning) => warning.includes('not timeline-aware'))).toBe(true);
   });
 
+  it('never attaches an enable window to zoompan and warns instead', () => {
+    const plan = planFor(
+      makeProject({
+        clips: [
+          makeClip('c1', 'a1', {
+            effects: [effect('kenburns', { zoom: 1.2 }, { startMs: 500, durationMs: 500 })],
+          }),
+        ],
+      }),
+    );
+    expect(plan.filterGraph).toContain('zoompan=');
+    expect(plan.filterGraph).not.toContain('enable=');
+    expect(plan.warnings.some((warning) => warning.includes('not timeline-aware'))).toBe(true);
+  });
+
   it('collects warnings for unknown and unmapped effects', () => {
     const plan = planFor(
       makeProject({
@@ -429,7 +511,8 @@ describe('buildRenderPlan: audio', () => {
     const plan = planFor(
       makeProject({ clips: [makeClip('c1', 'a1', { inMs: 500, outMs: 1500, volume: 0.5 })] }),
     );
-    expect(plan.filterGraph).toContain('[0:a]atrim=start=0.500:end=1.500');
+    expect(plan.args).toEqual(expect.arrayContaining(['-ss', '0.500', '-to', '1.500']));
+    expect(plan.filterGraph).toContain('[0:a]atrim=start=0.000:end=1.000');
     expect(plan.filterGraph).toContain('volume=0.5');
     expect(plan.filterGraph).toContain('aresample=48000');
     expect(plan.filterGraph).toContain('[aout]');
@@ -487,6 +570,53 @@ describe('buildRenderPlan: audio', () => {
 
   it('skips muted clips and zero volume', () => {
     const plan = planFor(makeProject({ clips: [makeClip('c1', 'a1', { volume: 0 })] }));
+    expect(plan.filterGraph).not.toContain('[aout]');
+  });
+
+  it('applies clip fades to main video-track audio', () => {
+    const plan = planFor(
+      makeProject({
+        clips: [
+          makeClip('c1', 'a1', { outMs: 2000, audioFadeInMs: 500, audioFadeOutMs: 2000 }),
+        ],
+      }),
+    );
+    expect(plan.filterGraph).toContain('afade=t=in:st=0.000:d=0.500');
+    // A fade-out as long as the clip is legal: 2s fade starting at 0.
+    expect(plan.filterGraph).toContain('afade=t=out:st=0.000:d=2.000');
+  });
+
+  it('applies a full-length fade-out on an audio-track clip', () => {
+    const project = makeProject({
+      assets: [makeAsset('a1'), makeAsset('a3', 'audio')],
+      clips: [makeClip('c1', 'a1', { outMs: 1000 })],
+      audioClips: [makeClip('c2', 'a3', { outMs: 1200, audioFadeOutMs: 1200 })],
+    });
+    const plan = planFor(project);
+    expect(plan.filterGraph).toContain('afade=t=out:st=0.000:d=1.200');
+  });
+
+  it('skips silent video assets on audio tracks instead of referencing [N:a]', () => {
+    const project = makeProject({
+      assets: [makeAsset('a1'), makeAsset('silent', 'video', { hasAudio: false })],
+      clips: [makeClip('c1', 'a1', { volume: 0 })],
+      audioClips: [makeClip('c2', 'silent', { outMs: 1000 })],
+    });
+    const plan = planFor(project);
+    expect(plan.inputs).toEqual(['C:/media/a1.mp4']);
+    expect(plan.filterGraph).not.toContain('[1:a]');
+    expect(plan.filterGraph).not.toContain('[aout]');
+    expect(plan.warnings.some((warning) => warning.includes('has no audio'))).toBe(true);
+  });
+
+  it('skips zero-volume clips on audio tracks', () => {
+    const project = makeProject({
+      assets: [makeAsset('a1'), makeAsset('a3', 'audio')],
+      clips: [makeClip('c1', 'a1', { volume: 0 })],
+      audioClips: [makeClip('c2', 'a3', { outMs: 1000, volume: 0 })],
+    });
+    const plan = planFor(project);
+    expect(plan.inputs).toEqual(['C:/media/a1.mp4']);
     expect(plan.filterGraph).not.toContain('[aout]');
   });
 });
@@ -614,5 +744,39 @@ describe('atempoChain', () => {
     const plan = planFor(makeProject({ clips: [makeClip('c1', 'a1', { outMs: 4000, speed: 4 })] }));
     expect(plan.filterGraph).toContain('atempo=2,atempo=2');
     expect(plan.durationMs).toBe(1000);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Filter-chain windowing (F-15)                                      */
+/* ------------------------------------------------------------------ */
+
+describe('withEnableWindow', () => {
+  it('splits only on top-level commas', () => {
+    expect(splitFilterChain("eq=contrast=1.2,drawtext=text='a,b':x=1")).toEqual([
+      'eq=contrast=1.2',
+      "drawtext=text='a,b':x=1",
+    ]);
+    expect(splitFilterChain('scale=w=if(gt(t,1),10,20):h=10')).toEqual([
+      'scale=w=if(gt(t,1),10,20):h=10',
+    ]);
+    expect(splitFilterChain('drawbox=x=0:y=0:w=10:h=10:t=fill,eq=contrast=1.1')).toEqual([
+      'drawbox=x=0:y=0:w=10:h=10:t=fill',
+      'eq=contrast=1.1',
+    ]);
+  });
+
+  it('attaches the window to every top-level filter but not inside quotes', () => {
+    const windowed = withEnableWindow("eq=contrast=1.2,drawtext=text='a,b':x=1", 0.5, 1.5);
+    expect(windowed).toBe(
+      "eq=contrast=1.2:enable='between(t,0.500,1.500)',drawtext=text='a,b':x=1:enable='between(t,0.500,1.500)'",
+    );
+  });
+
+  it('never attaches a window to zoompan', () => {
+    const zoom = "zoompan=z='1.2':d=1:s=1080x1920:fps=30,format=yuv420p";
+    expect(withEnableWindow(zoom, 0.5, 1.5)).toBe(
+      "zoompan=z='1.2':d=1:s=1080x1920:fps=30,format=yuv420p:enable='between(t,0.500,1.500)'",
+    );
   });
 });

@@ -5,14 +5,16 @@ import type {
   AgentSettings,
   AgentTurnInput,
   ChatMessage,
+  ChatRequest,
   ChatResponse,
   Provider,
   ProviderConfig,
   Receipt,
+  ToolCall,
 } from './types';
 import { buildSystemPrompt, summarizeProject } from './prompt';
 import type { CreateReceiptInput } from './receipts';
-import { EMPTY_RESPONSE, errorMessage, isAbortError, ProviderError } from './providers/base';
+import { EMPTY_RESPONSE, abortError, errorMessage, isAbortError, ProviderError, throwIfAborted } from './providers/base';
 import { buildToolSpecs, effectIdsFromCatalog, executeTool } from './tools';
 
 export interface ReceiptRecorder {
@@ -35,6 +37,16 @@ interface RunStats {
   toolCalls: string[];
   appliedCommands: number;
 }
+
+/** Hard cap on replayed conversation history messages. */
+export const MAX_HISTORY_MESSAGES = 24;
+/** Character budget for replayed history (project state is always fresh). */
+export const HISTORY_CHAR_BUDGET = 60_000;
+
+/** Retryable provider failures are retried at most this many times. */
+export const MAX_PROVIDER_RETRIES = 2;
+const RETRY_BASE_MS = 250;
+const RETRY_MAX_MS = 2_000;
 
 /**
  * The Editbay agent loop.
@@ -77,10 +89,12 @@ export class Agent {
     const settings = this.runtime.settings;
     const maxSteps = Math.max(1, Math.floor(this.maxStepsOverride ?? settings.maxSteps ?? 8));
     const autoApply = settings.autoApply === true;
+    const signal = input.signal;
     const stats: RunStats = { steps: 0, toolCalls: [], appliedCommands: 0 };
     let finalText = '';
 
     try {
+      throwIfAborted(signal);
       const project = this.runtime.project();
       const brand = project.brandId ? await this.runtime.memory.getBrand(project.brandId) : null;
       const skills = await this.runtime.skills.match(input.text, 3);
@@ -95,10 +109,12 @@ export class Agent {
 
       const messages: ChatMessage[] = [
         { role: 'system', content: prompt },
+        ...capHistory(input.history ?? []),
         { role: 'user', content: input.text },
       ];
 
       for (let step = 0; step < maxSteps; step += 1) {
+        throwIfAborted(signal);
         stats.steps = step + 1;
         yield {
           type: 'status',
@@ -108,7 +124,8 @@ export class Agent {
               : `Continuing with ${this.provider.label} (step ${step + 1}/${maxSteps})…`,
         };
 
-        const response = await this.chat(messages, settings);
+        const response = await this.chat(messages, settings, signal);
+        throwIfAborted(signal);
         const calls = response.toolCalls ?? [];
         stats.toolCalls.push(...calls.map((call) => call.name));
 
@@ -147,11 +164,54 @@ export class Agent {
           yield { type: 'message', text };
           break;
         } else {
-          messages.push({ role: 'assistant', content: response.text, toolCalls: calls });
+          messages.push({
+            role: 'assistant',
+            content: response.text,
+            toolCalls: calls,
+            ...(response.thoughts !== undefined ? { thoughts: response.thoughts } : {}),
+          });
           let clarification: string | null = null;
+          let proposed: AgentCommand[] | null = null;
 
           for (const call of calls) {
+            throwIfAborted(signal);
             yield { type: 'tool_start', call };
+
+            // Proposal mode is enforced structurally: a model that still calls
+            // apply_commands gets a proposal event and never mutates anything.
+            if (!autoApply && call.name === 'apply_commands') {
+              const commands = commandsFromToolCall(call);
+              if (commands === null) {
+                const summary =
+                  'apply_commands expects { commands: [...] } with objects that have a string "op".';
+                yield { type: 'tool_end', call, ok: false, summary };
+                messages.push({
+                  role: 'tool',
+                  content: JSON.stringify({ ok: false, summary }),
+                  toolCallId: call.id,
+                  name: call.name,
+                });
+                continue;
+              }
+              const summary = commandsSummary(commands);
+              yield {
+                type: 'tool_end',
+                call,
+                ok: true,
+                summary: `${summary} Proposal only: the user must approve it.`,
+              };
+              yield { type: 'proposal', commands, summary };
+              messages.push({
+                role: 'tool',
+                content: JSON.stringify({ ok: true, proposal: true, summary }),
+                toolCallId: call.id,
+                name: call.name,
+              });
+              proposed = commands;
+              finalText = summary;
+              continue;
+            }
+
             const result = await executeTool(call, { runtime: this.runtime });
             yield {
               type: 'tool_end',
@@ -185,6 +245,11 @@ export class Agent {
             break;
           }
 
+          if (proposed) {
+            yield { type: 'message', text: finalText };
+            break;
+          }
+
           if (step === maxSteps - 1) {
             finalText = `Stopped after ${maxSteps} step${maxSteps === 1 ? '' : 's'}.`;
             yield { type: 'message', text: finalText };
@@ -208,17 +273,48 @@ export class Agent {
 
   /* ---------------------------------------------------------------- */
 
-  private async chat(messages: ChatMessage[], settings: AgentSettings): Promise<ChatResponse> {
-    return this.provider.chat(
-      {
-        model: settings.model?.trim() || this.provider.defaultModel,
-        messages,
-        tools: buildToolSpecs(),
-        ...(settings.temperature !== undefined ? { temperature: settings.temperature } : {}),
-        ...(settings.maxTokens !== undefined ? { maxTokens: settings.maxTokens } : {}),
-      },
-      this.providerConfig,
-    );
+  private async chat(
+    messages: ChatMessage[],
+    settings: AgentSettings,
+    signal?: AbortSignal,
+  ): Promise<ChatResponse> {
+    const request: ChatRequest = {
+      model: settings.model?.trim() || this.provider.defaultModel,
+      messages,
+      tools: buildToolSpecs({ autoApply: settings.autoApply === true }),
+      ...(settings.temperature !== undefined ? { temperature: settings.temperature } : {}),
+      ...(settings.maxTokens !== undefined ? { maxTokens: settings.maxTokens } : {}),
+    };
+
+    let retries = 0;
+    for (;;) {
+      throwIfAborted(signal);
+      try {
+        const response = await this.provider.chat(
+          { ...request, ...(signal !== undefined ? { signal } : {}) },
+          this.providerConfig,
+        );
+        if (response.text.trim() === '' && (response.toolCalls?.length ?? 0) === 0) {
+          throw new ProviderError(
+            `${EMPTY_RESPONSE}: ${this.provider.label} returned an empty response.`,
+            { code: 'empty_response', retryable: true },
+          );
+        }
+        return response;
+      } catch (error) {
+        if (isAbortError(error) || signal?.aborted === true) throw abortError();
+        if (
+          !(error instanceof ProviderError) ||
+          !error.retryable ||
+          retries >= MAX_PROVIDER_RETRIES
+        ) {
+          throw error;
+        }
+        const delay = retryDelayMs(error, retries);
+        retries += 1;
+        await sleep(delay, signal);
+      }
+    }
   }
 
   private async writeReceipt(
@@ -303,6 +399,119 @@ function isAgentOptions(value: AgentRuntime | AgentOptions): value is AgentOptio
 /** Default receipt log under the workspace root, when one is available. */
 export function defaultReceiptStore(_runtime: AgentRuntime): null {
   return null;
+}
+
+/* ------------------------------------------------------------------ */
+/* Conversation history budget                                         */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Keep the most recent history within a message and character budget.
+ * Assistant messages stay attached to their tool results so providers never
+ * receive a `tool` message without the `tool_calls` that produced it.
+ */
+export function capHistory(
+  history: ChatMessage[],
+  maxMessages = MAX_HISTORY_MESSAGES,
+  charBudget = HISTORY_CHAR_BUDGET,
+): ChatMessage[] {
+  if (history.length === 0) return [];
+
+  const units = groupHistory(history);
+  const kept: ChatMessage[][] = [];
+  let messageCount = 0;
+  let charCount = 0;
+
+  for (let index = units.length - 1; index >= 0; index -= 1) {
+    const unit = units[index];
+    if (!unit) continue;
+    const unitChars = unit.reduce((sum, message) => sum + messageChars(message), 0);
+    // Always keep at least the newest unit, even if it alone exceeds a budget.
+    if (
+      kept.length > 0 &&
+      (messageCount + unit.length > maxMessages || charCount + unitChars > charBudget)
+    ) {
+      break;
+    }
+    kept.unshift(unit);
+    messageCount += unit.length;
+    charCount += unitChars;
+  }
+
+  return kept.flat();
+}
+
+/** Group a transcript into assistant+tool units; orphan tool messages are dropped. */
+function groupHistory(history: ChatMessage[]): ChatMessage[][] {
+  const units: ChatMessage[][] = [];
+  let current: ChatMessage[] | null = null;
+  let expectsToolResults = false;
+
+  for (const message of history) {
+    if (message.role === 'tool') {
+      if (expectsToolResults && current) current.push(message);
+      continue;
+    }
+    current = [message];
+    units.push(current);
+    expectsToolResults = message.role === 'assistant' && (message.toolCalls?.length ?? 0) > 0;
+  }
+
+  return units;
+}
+
+function messageChars(message: ChatMessage): number {
+  const toolCalls = message.toolCalls === undefined ? '' : JSON.stringify(message.toolCalls);
+  return message.content.length + toolCalls.length + (message.thoughts?.length ?? 0);
+}
+
+/* ------------------------------------------------------------------ */
+/* Provider retries                                                    */
+/* ------------------------------------------------------------------ */
+
+/** Exponential backoff, honoring a server-provided Retry-After delay. */
+function retryDelayMs(error: ProviderError, attempt: number): number {
+  if (error.retryAfterMs !== undefined) {
+    return Math.min(RETRY_MAX_MS, Math.max(0, error.retryAfterMs));
+  }
+  return Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** attempt);
+}
+
+/** Abortable sleep: resolves after `ms`, rejects with AbortError on cancel. */
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (ms <= 0) return Promise.resolve();
+  return new Promise<void>((resolve, reject) => {
+    if (signal?.aborted === true) {
+      reject(abortError());
+      return;
+    }
+    function cleanup(): void {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+    }
+    function onAbort(): void {
+      cleanup();
+      reject(abortError());
+    }
+    const timer = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+/** Extract and shape-check commands from an apply_commands tool call. */
+function commandsFromToolCall(call: ToolCall): AgentCommand[] | null {
+  const raw = call.arguments.commands;
+  if (!Array.isArray(raw) || raw.length === 0) return null;
+  const commands: AgentCommand[] = [];
+  for (const item of raw) {
+    const record = asRecord(item);
+    if (!record || typeof record.op !== 'string' || record.op.trim() === '') return null;
+    commands.push(record as unknown as AgentCommand);
+  }
+  return commands;
 }
 
 function attachmentsInstruction(input: AgentTurnInput): string {

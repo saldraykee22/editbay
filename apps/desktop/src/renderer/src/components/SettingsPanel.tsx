@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Button, Chip, Field, Input, Select, Section } from '@editbay/ui';
-import { PROVIDERS, getApiKey, providerPreset, setApiKey, type AppSettings } from '../state/settings';
+import { PROVIDERS, hasApiKey, providerPreset, setApiKey, type AppSettings } from '../state/settings';
 
 export function SettingsPanel({
   settings,
@@ -12,15 +12,16 @@ export function SettingsPanel({
   const preset = providerPreset(settings.providerId);
   const [apiKey, setKey] = useState('');
   const [hasKey, setHasKey] = useState(false);
+  const [keychain, setKeychain] = useState<boolean | null>(null);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<string | null>(null);
   const [oauthBusy, setOauthBusy] = useState(false);
 
   useEffect(() => {
     let alive = true;
-    void getApiKey(settings.providerId).then((key) => {
+    void hasApiKey(settings.providerId).then((stored) => {
       if (!alive) return;
-      setHasKey(Boolean(key));
+      setHasKey(stored);
       setKey('');
     });
     return () => {
@@ -31,9 +32,20 @@ export function SettingsPanel({
   const update = (patch: Partial<AppSettings>) => onChange({ ...settings, ...patch });
 
   const saveKey = async () => {
-    await setApiKey(settings.providerId, apiKey);
-    setHasKey(Boolean(apiKey.trim()));
-    setTestResult(apiKey.trim() ? 'Key saved to the OS keychain.' : 'Key removed.');
+    const trimmed = apiKey.trim();
+    const result = await setApiKey(settings.providerId, apiKey);
+    setHasKey(Boolean(trimmed));
+    setKeychain(trimmed ? result.encrypted : null);
+    if (!trimmed) {
+      setTestResult('Key removed.');
+    } else if (result.encrypted) {
+      setTestResult('Key saved to the OS keychain.');
+    } else {
+      setTestResult(
+        'Warning: the OS keychain is unavailable, so the key is stored unencrypted in secrets.json (user-only permissions).',
+      );
+    }
+    setKey('');
   };
 
   const test = async () => {
@@ -128,16 +140,25 @@ export function SettingsPanel({
             onChange={(event) => setKey(event.target.value)}
           />
         </Field>
-        <div style={{ display: 'flex', gap: 6 }}>
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
           <Button size="sm" onClick={saveKey} icon="save">
             Save key
           </Button>
           <Button size="sm" variant="ghost" onClick={test} disabled={testing} icon="bolt">
             {testing ? 'Testing…' : 'Test connection'}
           </Button>
+          {keychain === false ? <Chip tone="warn">Unencrypted storage</Chip> : null}
         </div>
         {testResult ? (
-          <div className="hint" style={{ color: testResult.startsWith('Failed') ? 'var(--danger)' : 'var(--accent)' }}>
+          <div
+            className="hint"
+            style={{
+              color:
+                testResult.startsWith('Failed') || testResult.startsWith('Warning')
+                  ? 'var(--danger)'
+                  : 'var(--accent)',
+            }}
+          >
             {testResult}
           </div>
         ) : null}

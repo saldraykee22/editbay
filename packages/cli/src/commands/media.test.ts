@@ -193,8 +193,22 @@ suite('media commands', () => {
     expect(parsed.summary).not.toContain(dir);
   });
 
-  it('probe returns duration and dimensions', async () => {
-    const jsonCap = capture();
+  it('imports nothing when one path in the batch is missing', async () => {
+    const missing = path.join(fixtureDir, 'does-not-exist.mp4');
+    const cap = capture();
+    const code = await run(
+      ['import', videoPath, missing, '--project', projectPath, '--workspace', workspace],
+      cap.io,
+    );
+    expect(code).toBe(1);
+    expect(cap.stderr()).toContain('Media file not found');
+
+    const project = JSON.parse(await readFile(projectPath, 'utf8')) as Project;
+    expect(project.assets).toHaveLength(0);
+    expect(project.tracks.reduce((total, track) => total + track.clips.length, 0)).toBe(0);
+  });
+
+  it('probe returns duration and dimensions', async () => {    const jsonCap = capture();
     expect(
       await run(['probe', videoPath, '--json', '--project', projectPath, '--workspace', workspace], jsonCap.io),
     ).toBe(0);

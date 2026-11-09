@@ -19,8 +19,8 @@ export function registerMediaTools(server: McpServer, studio: HeadlessStudio): v
         'Import local video, image or audio files into the project and add a clip for each on a track. ' +
         'Use it when the user points at files that are not in get_project yet; pass absolute paths. ' +
         'The response contains assetId/clipId/label/kind/durationMs — use those ids afterwards. ' +
-        'File paths are consumed by the server and are never echoed back to the model. Importing is undoable ' +
-        'through delete_asset if the user changes their mind.',
+        'File paths are consumed by the server and are never echoed back to the model. Each imported file is one ' +
+        'undo step: a single `undo` removes both the asset and its clip.',
       inputSchema: {
         paths: z
           .array(z.string().min(1))
@@ -29,7 +29,9 @@ export function registerMediaTools(server: McpServer, studio: HeadlessStudio): v
         trackId: z
           .string()
           .optional()
-          .describe('Target track id from get_project. Omit to use the default track for the media kind.'),
+          .describe(
+            'Target track id from get_project (video or audio only). Omit to use the default track for the media kind.',
+          ),
         index: z
           .number()
           .int()
@@ -40,6 +42,20 @@ export function registerMediaTools(server: McpServer, studio: HeadlessStudio): v
     },
     async (args) => {
       try {
+        if (args.trackId !== undefined) {
+          const target = studio.project.tracks.find((track) => track.id === args.trackId);
+          if (!target) {
+            return errorResult(`Track not found: ${args.trackId}. Use a trackId from get_project.`, {
+              validIds: availableIds(studio.project),
+            });
+          }
+          if (target.kind === 'overlay') {
+            return errorResult(
+              `Track ${args.trackId} is an overlay track, which the renderer does not composite yet. ` +
+                'Import onto the video or audio track and place the clip with set_clip_transform.',
+            );
+          }
+        }
         const imported = await studio.importMedia(args.paths, {
           ...(args.trackId === undefined ? {} : { trackId: args.trackId }),
           ...(args.index === undefined ? {} : { index: args.index }),

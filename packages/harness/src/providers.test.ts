@@ -159,6 +159,21 @@ describe('OpenAI-compatible provider', () => {
     ).rejects.toThrow(/Rate limited/);
   });
 
+  it('exposes a Retry-After header as retryAfterMs', async () => {
+    const limited = createOpenAICompatibleProvider({
+      fetchImpl: async () =>
+        new Response('slow down', {
+          status: 429,
+          headers: { 'retry-after': '2' },
+        }),
+    });
+    const error = await limited
+      .chat({ model: 'm', messages: [{ role: 'user', content: 'hi' }] }, {})
+      .catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(ProviderError);
+    expect((error as ProviderError).retryAfterMs).toBe(2000);
+  });
+
   it('maps network failures and empty or malformed responses', async () => {
     const offline = createOpenAICompatibleProvider({
       fetchImpl: async () => {
@@ -299,6 +314,79 @@ describe('Gemini provider', () => {
       { id: 'call_1', name: 'list_assets', arguments: { scope: 'all' } },
     ]);
     expect(response.usage).toEqual({ inputTokens: 9, outputTokens: 3 });
+  });
+
+  it('preserves thought parts and thoughtSignature across a round-trip', async () => {
+    let requests = 0;
+    let secondBody: Record<string, unknown> = {};
+    const fetchImpl: FetchLike = async (_input, init) => {
+      requests += 1;
+      if (requests === 1) {
+        return jsonResponse({
+          candidates: [
+            {
+              content: {
+                parts: [
+                  { text: 'I will trim the intro.', thought: true },
+                  {
+                    functionCall: {
+                      name: 'apply_commands',
+                      args: { commands: [{ op: 'trim_clip', clipId: 'clip-1', inMs: 500 }] },
+                    },
+                    thoughtSignature: 'sig_123',
+                  },
+                ],
+              },
+              finishReason: 'STOP',
+            },
+          ],
+        });
+      }
+      secondBody = bodyOf(init);
+      return jsonResponse({
+        candidates: [{ content: { parts: [{ text: 'Done.' }] }, finishReason: 'STOP' }],
+      });
+    };
+
+    const provider = createGeminiProvider({ fetchImpl });
+    const first = await provider.chat(
+      { model: 'gemini-3-pro', messages: [{ role: 'user', content: 'trim the intro' }] },
+      {},
+    );
+
+    // Reasoning text is kept out of the answer but preserved for the follow-up.
+    expect(first.text).toBe('');
+    expect(first.thoughts).toBe('I will trim the intro.');
+    expect(first.toolCalls[0]?.thoughtSignature).toBe('sig_123');
+
+    await provider.chat(
+      {
+        model: 'gemini-3-pro',
+        messages: [
+          { role: 'user', content: 'trim the intro' },
+          {
+            role: 'assistant',
+            content: first.text,
+            thoughts: first.thoughts,
+            toolCalls: first.toolCalls,
+          },
+          {
+            role: 'tool',
+            content: '{"ok":true}',
+            toolCallId: first.toolCalls[0]?.id,
+            name: 'apply_commands',
+          },
+        ],
+      },
+      {},
+    );
+
+    const contents = asArray(secondBody.contents);
+    const modelParts = asArray(asRecord(contents[1])?.parts);
+    const thoughtPart = modelParts.map(asRecord).find((part) => part?.thought === true);
+    expect(thoughtPart?.text).toBe('I will trim the intro.');
+    const functionPart = modelParts.map(asRecord).find((part) => part?.functionCall !== undefined);
+    expect(functionPart?.thoughtSignature).toBe('sig_123');
   });
 });
 

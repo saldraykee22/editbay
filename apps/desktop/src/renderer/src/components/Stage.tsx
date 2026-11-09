@@ -3,7 +3,14 @@ import { IconButton } from '@editbay/ui';
 import type { Project } from '@editbay/core';
 import { effectCatalog } from '@editbay/effects';
 import { EditorStore, mediaUrl, useEditorVersion, usePlayhead } from '../state/store';
-import { activeClipAt, drawFrame, sourceTimeMs, type MediaElement } from '../lib/compositor';
+import {
+  activeAudioClipsAt,
+  activeClipsAt,
+  drawFrame,
+  sourceTimeMs,
+  type ActiveClip,
+  type MediaElement,
+} from '../lib/compositor';
 
 function formatTime(ms: number, fps = 30): string {
   const total = Math.max(0, Math.round(ms));
@@ -27,6 +34,11 @@ export function useMediaElements(project: Project): Map<string, MediaElement> {
         const img = new Image();
         img.src = mediaUrl(asset.uri);
         map.set(asset.id, img);
+      } else if (asset.kind === 'audio') {
+        const audio = document.createElement('audio');
+        audio.src = mediaUrl(asset.uri);
+        audio.preload = 'auto';
+        map.set(asset.id, audio);
       } else {
         const video = document.createElement('video');
         video.src = mediaUrl(asset.uri);
@@ -40,9 +52,10 @@ export function useMediaElements(project: Project): Map<string, MediaElement> {
     for (const key of [...map.keys()]) {
       if (!seen.has(key)) {
         const element = map.get(key);
-        if (element instanceof HTMLVideoElement) {
+        if (element instanceof HTMLVideoElement || element instanceof HTMLAudioElement) {
           element.pause();
           element.removeAttribute('src');
+          element.load();
         }
         map.delete(key);
       }
@@ -102,21 +115,31 @@ export function Stage({
     let fpsFrames = 0;
 
     const syncMedia = () => {
-      const active = activeClipAt(project, store.playheadMs);
-      const activeElement = active ? media.get(active.asset.id) : undefined;
-      for (const [assetId, element] of media) {
-        if (!(element instanceof HTMLVideoElement)) continue;
-        if (active && active.asset.id === assetId && active.asset.kind === 'video') {
-          element.muted = muted;
-          const target = Math.max(0, sourceTimeMs(active) / 1000);
-          if (Math.abs(element.currentTime - target) > 0.35) element.currentTime = target;
-          if (store.playing && element.paused) void element.play().catch(() => undefined);
-          if (!store.playing && !element.paused) element.pause();
-        } else if (!element.paused) {
-          element.pause();
-        }
+      const timeMs = store.playheadMs;
+      const activeByAsset = new Map<string, ActiveClip>();
+      for (const entry of activeClipsAt(project, timeMs)) activeByAsset.set(entry.asset.id, entry);
+      for (const entry of activeAudioClipsAt(project, timeMs)) {
+        if (!activeByAsset.has(entry.asset.id)) activeByAsset.set(entry.asset.id, entry);
       }
-      if (activeElement instanceof HTMLVideoElement) activeElement.muted = muted;
+
+      for (const [assetId, element] of media) {
+        if (!(element instanceof HTMLVideoElement) && !(element instanceof HTMLAudioElement)) continue;
+        const active = activeByAsset.get(assetId);
+        if (!active) {
+          if (!element.paused) element.pause();
+          continue;
+        }
+        const speed = active.clip.speed && active.clip.speed > 0 ? active.clip.speed : 1;
+        const volume = Math.min(1, Math.max(0, active.clip.volume ?? 1));
+        // The browser element cannot exceed 1.0; export still applies 0..2.
+        element.volume = volume;
+        element.muted = muted || active.trackMuted || volume === 0;
+        if (Number.isFinite(speed) && speed > 0) element.playbackRate = speed;
+        const target = Math.max(0, sourceTimeMs(active) / 1000);
+        if (Math.abs(element.currentTime - target) > 0.35) element.currentTime = target;
+        if (store.playing && element.paused) void element.play().catch(() => undefined);
+        if (!store.playing && !element.paused) element.pause();
+      }
     };
 
     const tick = (now: number) => {
@@ -150,7 +173,7 @@ export function Stage({
     return () => {
       cancelAnimationFrame(raf);
       for (const element of media.values()) {
-        if (element instanceof HTMLVideoElement) element.pause();
+        if (element instanceof HTMLVideoElement || element instanceof HTMLAudioElement) element.pause();
       }
     };
   }, [project, media, muted, store, showSafeArea]);

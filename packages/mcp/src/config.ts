@@ -6,6 +6,7 @@
  * harness. Relative paths are resolved against the working directory.
  */
 import { resolve } from 'node:path';
+import { resolveBuiltinSkillsDir } from '@editbay/kit';
 import type { StudioOptions } from '@editbay/kit';
 
 export interface EditbayConfig {
@@ -80,8 +81,9 @@ function absolute(value: string, cwd: string): string {
 /**
  * Builds the runtime configuration.
  *
- * Defaults: project `./editbay.json`; workspace and builtin skills are unset,
- * which lets `HeadlessStudio` fall back to its own defaults.
+ * Defaults: project `./editbay.json`; workspace unset (the studio falls back to
+ * `~/.editbay`); builtin skills resolve from `EDITBAY_BUILTIN_SKILLS`, then the
+ * `skills` folder next to the bundled server, then the repo resources.
  */
 export function resolveConfig(
   argv: readonly string[] = [],
@@ -92,13 +94,16 @@ export function resolveConfig(
 
   const project = nonEmpty(args.project) ?? nonEmpty(env.EDITBAY_PROJECT) ?? 'editbay.json';
   const workspace = nonEmpty(args.workspace) ?? nonEmpty(env.EDITBAY_WORKSPACE);
-  const builtinSkills = nonEmpty(args.builtinSkills) ?? nonEmpty(env.EDITBAY_BUILTIN_SKILLS);
+  const explicitSkills = nonEmpty(args.builtinSkills) ?? nonEmpty(env.EDITBAY_BUILTIN_SKILLS);
+  // An explicit value stays cwd-relative; discovery returns an absolute folder.
+  const builtinSkills =
+    explicitSkills === undefined ? resolveBuiltinSkillsDir({ env: {}, cwd }) : absolute(explicitSkills, cwd);
   const name = nonEmpty(args.name);
 
   return {
     projectPath: absolute(project, cwd),
     ...(workspace === undefined ? {} : { workspaceRoot: absolute(workspace, cwd) }),
-    ...(builtinSkills === undefined ? {} : { builtinSkillsDir: absolute(builtinSkills, cwd) }),
+    ...(builtinSkills === undefined ? {} : { builtinSkillsDir: builtinSkills }),
     ...(name === undefined ? {} : { name }),
   };
 }

@@ -5,9 +5,10 @@ import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { DEFAULT_TEXT_STYLE } from '@editbay/core';
 import type { Asset, Clip, Project, Track } from '@editbay/core';
+import { availableVideoEncoders, selectVideoEncoder, videoEncoderArgs } from './encoder';
 import { exportProject } from './export';
 import { isFfmpegAvailable, resolveFfmpeg, runCommand, runCommandBuffer } from './ffmpeg';
-import { buildRenderPlan } from './plan';
+import { buildRenderPlan, QUALITY_PRESETS } from './plan';
 import { probeMedia } from './probe';
 import { extractFrameDataUrl, makeThumbnail } from './thumbs';
 import type { ExportProgress, ProbeResult } from './types';
@@ -21,12 +22,25 @@ const suite = ffmpegAvailable ? describe : describe.skip;
 
 const CANVAS = { width: 320, height: 240, fps: 30 } as const;
 
+/** Fixture generation must respect the same encoder policy as exports. */
+function fixtureEncodeArgs(width: number, height: number): string[] {
+  return videoEncoderArgs({
+    encoder: selectVideoEncoder().encoder,
+    quality: 'draft',
+    preset: QUALITY_PRESETS.draft,
+    width,
+    height,
+    fps: 30,
+  });
+}
+
 interface Fixtures {
   dir: string;
   red: { path: string; probe: ProbeResult };
   blue: { path: string; probe: ProbeResult };
   music: { path: string; probe: ProbeResult };
   image: { path: string; probe: ProbeResult };
+  tall: { path: string; probe: ProbeResult };
 }
 
 let fixtures: Fixtures | undefined;
@@ -175,6 +189,7 @@ suite('engine e2e (real ffmpeg)', () => {
     const bluePath = path.join(dir, 'blue.mp4');
     const musicPath = path.join(dir, 'music.m4a');
     const imagePath = path.join(dir, 'still.png');
+    const tallPath = path.join(dir, 'tall.mp4');
 
     await runFfmpeg([
       '-y',
@@ -189,10 +204,7 @@ suite('engine e2e (real ffmpeg)', () => {
       'lavfi',
       '-i',
       'sine=frequency=440:sample_rate=48000:duration=2',
-      '-c:v',
-      'libx264',
-      '-preset',
-      'ultrafast',
+      ...fixtureEncodeArgs(320, 240),
       '-pix_fmt',
       'yuv420p',
       '-c:a',
@@ -215,10 +227,7 @@ suite('engine e2e (real ffmpeg)', () => {
       'lavfi',
       '-i',
       'sine=frequency=660:sample_rate=48000:duration=2',
-      '-c:v',
-      'libx264',
-      '-preset',
-      'ultrafast',
+      ...fixtureEncodeArgs(320, 240),
       '-pix_fmt',
       'yuv420p',
       '-c:a',
@@ -254,12 +263,28 @@ suite('engine e2e (real ffmpeg)', () => {
       '1',
       imagePath,
     ]);
+    // Tall yuv420p source: 1080 * 0.501 = 541 is odd (F-03 regression).
+    await runFfmpeg([
+      '-y',
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-f',
+      'lavfi',
+      '-i',
+      'color=c=teal:s=1080x1920:r=30:d=1',
+      ...fixtureEncodeArgs(1080, 1920),
+      '-pix_fmt',
+      'yuv420p',
+      tallPath,
+    ]);
 
-    const [redProbe, blueProbe, musicProbe, imageProbe] = await Promise.all([
+    const [redProbe, blueProbe, musicProbe, imageProbe, tallProbe] = await Promise.all([
       probeMedia(redPath),
       probeMedia(bluePath),
       probeMedia(musicPath),
       probeMedia(imagePath),
+      probeMedia(tallPath),
     ]);
 
     fixtures = {
@@ -268,6 +293,7 @@ suite('engine e2e (real ffmpeg)', () => {
       blue: { path: bluePath, probe: blueProbe },
       music: { path: musicPath, probe: musicProbe },
       image: { path: imagePath, probe: imageProbe },
+      tall: { path: tallPath, probe: tallProbe },
     };
   });
 
@@ -286,6 +312,8 @@ suite('engine e2e (real ffmpeg)', () => {
     expect(f.music.probe.hasAudio).toBe(true);
     expect(f.music.probe.videoCodec).toBeUndefined();
     expect(f.image.probe.hasAudio).toBe(false);
+    expect(f.tall.probe.width).toBe(1080);
+    expect(f.tall.probe.height).toBe(1920);
   });
 
   it('exports the showreel with a transition, text and mixed audio', async () => {
@@ -315,6 +343,8 @@ suite('engine e2e (real ffmpeg)', () => {
     expect(probe.audioCodec).toBe('aac');
     expect(probe.hasAudio).toBe(true);
     expect(Math.abs(probe.durationMs - 2200)).toBeLessThanOrEqual(300);
+    // F-08: the export reports a real, probed encoder.
+    expect(availableVideoEncoders()).toContain(result.videoEncoder);
 
     // Progress is monotonic and reaches the end.
     expect(progress.length).toBeGreaterThan(0);
@@ -343,6 +373,90 @@ suite('engine e2e (real ffmpeg)', () => {
     expect(r2).toBeLessThanOrEqual(40);
     expect(g2).toBeLessThanOrEqual(40);
     expect(Math.abs(b2 - 255)).toBeLessThanOrEqual(40);
+  });
+
+  it('resolves an encoder from the probed list and maps quality args', () => {
+    const project = buildShowreel();
+    const plan = buildRenderPlan(project, {
+      assetPaths: assetPathsOf(project),
+      quality: 'draft',
+      outPath: path.join(fixture().dir, 'plan.mp4'),
+      textFileDir: fixture().dir,
+    });
+
+    const available = availableVideoEncoders();
+    expect(available.length).toBeGreaterThan(0);
+    expect(available).toContain(plan.videoEncoder);
+    expect(plan.args[plan.args.indexOf('-c:v') + 1]).toBe(plan.videoEncoder);
+
+    if (plan.videoEncoder === 'libx264') {
+      expect(plan.args).toEqual(expect.arrayContaining(['-preset', 'ultrafast', '-crf', '28']));
+    } else {
+      expect(plan.args).toContain('-b:v');
+      expect(plan.args).not.toContain('-crf');
+      expect(plan.warnings.some((warning) => warning.includes('libx264 is not available'))).toBe(true);
+    }
+  });
+
+  it('exports a 0.501-scaled clip from a 1080x1920 yuv420p source', async () => {
+    const f = fixture();
+    const asset: Asset = {
+      id: 'tall',
+      kind: 'video',
+      uri: f.tall.path,
+      label: 'Tall clip',
+      durationMs: f.tall.probe.durationMs,
+      width: f.tall.probe.width,
+      height: f.tall.probe.height,
+      fps: f.tall.probe.fps,
+      hasAudio: false,
+    };
+    const project: Project = {
+      schemaVersion: 2,
+      id: 'scaled',
+      name: 'Scaled',
+      canvas: { width: 1080, height: 1920, fps: 30 },
+      assets: [asset],
+      tracks: [
+        {
+          id: 'video',
+          kind: 'video',
+          clips: [
+            makeClip('tall-clip', 'tall', {
+              inMs: 0,
+              outMs: 600,
+              transform: { x: 0, y: 0, scale: 0.501, rotation: 0, opacity: 1 },
+            }),
+          ],
+          items: [],
+        },
+      ],
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    };
+
+    const outPath = path.join(f.dir, 'scaled.mp4');
+    const plan = buildRenderPlan(project, {
+      assetPaths: assetPathsOf(project),
+      quality: 'draft',
+      outPath,
+      textFileDir: f.dir,
+    });
+    expect(plan.filterGraph).toContain(
+      "format=rgba,scale=w='max(2,trunc(iw*0.501/2)*2)':h='max(2,trunc(ih*0.501/2)*2)'",
+    );
+
+    const result = await exportProject(project, {
+      outPath,
+      assetPaths: assetPathsOf(project),
+      quality: 'draft',
+    });
+    expect(result.sizeBytes).toBeGreaterThan(1000);
+
+    const probe = await probeMedia(outPath);
+    expect(probe.width).toBe(1080);
+    expect(probe.height).toBe(1920);
+    expect(Math.abs(probe.durationMs - 600)).toBeLessThanOrEqual(300);
   });
 
   it('extracts data-url frames and writes thumbnails', async () => {
@@ -436,5 +550,51 @@ suite('engine e2e (real ffmpeg)', () => {
     expect(existsSync(outPath)).toBe(false);
     const leftovers = existsSync(outDir) ? await readdir(outDir) : [];
     expect(leftovers).toEqual([]);
+    expect(leftovers.filter((name) => name.includes('.tmp-'))).toEqual([]);
+  });
+
+  it('aborts mid-export without leaking temp files into the output folder', async () => {
+    const f = fixture();
+    const red = videoAsset('red', f.red.path, f.red.probe, 'Red clip');
+    const blue = videoAsset('blue', f.blue.path, f.blue.probe, 'Blue clip');
+    const clips: Clip[] = [];
+    for (let index = 0; index < 30; index += 1) {
+      clips.push(makeClip(`abort-${index}`, index % 2 === 0 ? 'red' : 'blue', { inMs: 0, outMs: 1200 }));
+    }
+    const project: Project = {
+      schemaVersion: 2,
+      id: 'abort-mid',
+      name: 'Abort mid',
+      canvas: CANVAS,
+      assets: [red, blue],
+      tracks: [{ id: 'video', kind: 'video', clips, items: [] }],
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    };
+
+    const outDir = path.join(f.dir, 'aborted-mid');
+    const outPath = path.join(outDir, 'mid.mp4');
+    const controller = new AbortController();
+    let aborted = false;
+
+    await expect(
+      exportProject(project, {
+        outPath,
+        assetPaths: assetPathsOf(project),
+        // A slow preset guarantees the export is still running at 0.5 s.
+        quality: 'high',
+        signal: controller.signal,
+        onProgress: () => {
+          if (aborted) return;
+          aborted = true;
+          controller.abort();
+        },
+      }),
+    ).rejects.toThrow(/aborted/i);
+
+    expect(aborted).toBe(true);
+    expect(existsSync(outPath)).toBe(false);
+    const leftovers = existsSync(outDir) ? await readdir(outDir) : [];
+    expect(leftovers.filter((name) => name.includes('.tmp-'))).toEqual([]);
   });
 });

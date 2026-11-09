@@ -1,10 +1,16 @@
 import { useState } from 'react';
 import type { TextItem } from '@editbay/core';
+import { clipTimelineDurationMs } from '@editbay/core';
 import { Button, Field, Input, Modal, Select, Textarea } from '@editbay/ui';
 import { EditorStore, useEditorVersion } from '../state/store';
-import { clipDurationMs } from '../lib/compositor';
 
 export type InspectorTarget = { kind: 'text'; id: string } | { kind: 'clip'; id: string } | null;
+
+/** `Number('0') || 1` must not turn a deliberate 0 into 100%. */
+function numberOr(value: string, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
 
 export function Inspector({
   store,
@@ -128,16 +134,18 @@ function ClipInspector({ store, clipId, onClose }: { store: EditorStore; clipId:
   const [opacity, setOpacity] = useState(String(clip.transform?.opacity ?? 1));
 
   const apply = () => {
-    store.apply({ op: 'set_volume', clipId: clip.id, volume: Math.min(2, Math.max(0, Number(volume) || 1)) });
-    store.apply({ op: 'set_clip_speed', clipId: clip.id, speed: Math.min(4, Math.max(0.25, Number(speed) || 1)) });
-    store.apply({
-      op: 'set_clip_transform',
-      clipId: clip.id,
-      transform: {
-        scale: Math.min(8, Math.max(0.05, Number(scale) || 1)),
-        opacity: Math.min(1, Math.max(0, Number(opacity) || 1)),
+    store.applyBatch([
+      { op: 'set_volume', clipId: clip.id, volume: Math.min(2, Math.max(0, numberOr(volume, clip.volume ?? 1))) },
+      { op: 'set_clip_speed', clipId: clip.id, speed: Math.min(4, Math.max(0.25, numberOr(speed, clip.speed ?? 1))) },
+      {
+        op: 'set_clip_transform',
+        clipId: clip.id,
+        transform: {
+          scale: Math.min(8, Math.max(0.05, numberOr(scale, clip.transform?.scale ?? 1))),
+          opacity: Math.min(1, Math.max(0, numberOr(opacity, clip.transform?.opacity ?? 1))),
+        },
       },
-    });
+    ]);
     onClose();
   };
 
@@ -177,7 +185,7 @@ function ClipInspector({ store, clipId, onClose }: { store: EditorStore; clipId:
       }
     >
       <div className="hint">
-        {asset?.label ?? 'clip'} · {(clipDurationMs(clip) / 1000).toFixed(2)}s
+        {asset?.label ?? 'clip'} · {(clipTimelineDurationMs(clip) / 1000).toFixed(2)}s
       </div>
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
         <Field label="Volume (0-2)">

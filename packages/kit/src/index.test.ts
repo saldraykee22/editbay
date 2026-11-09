@@ -1,9 +1,10 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { HeadlessStudio } from './index';
+import { resolveBuiltinSkillsDir } from './skills-path';
 
 const root = resolve(import.meta.dirname, '..', '..', '..');
 const builtinSkills = join(root, 'apps/desktop/resources/skills');
@@ -145,5 +146,87 @@ describe('HeadlessStudio', () => {
     expect(catalog.effects.length).toBeGreaterThanOrEqual(10);
     expect(catalog.transitions.length).toBeGreaterThanOrEqual(5);
     expect(catalog.effects.some((effect) => effect.id === 'grade')).toBe(true);
+  });
+
+  it('serializes concurrent saves without throwing or leaking temp files', async () => {
+    const dir = join(workDir, 'save-race');
+    mkdirSync(dir, { recursive: true });
+    const instance = await studio(dir);
+    instance.apply([{ op: 'set_project_name', name: 'Race winner' }]);
+
+    await expect(
+      Promise.all([instance.save(), instance.save(), instance.save(), instance.save()]),
+    ).resolves.toEqual([undefined, undefined, undefined, undefined]);
+
+    const saved = JSON.parse(readFileSync(join(dir, 'editbay.json'), 'utf8')) as { name: string };
+    expect(saved.name).toBe('Race winner');
+    expect(readdirSync(dir).filter((name) => name.includes('.tmp'))).toHaveLength(0);
+  });
+
+  it('records one undo step per imported file (asset + clip)', async () => {
+    if (!hasFfmpeg) return;
+    const dir = join(workDir, 'import-undo');
+    mkdirSync(dir, { recursive: true });
+    const instance = await studio(dir);
+    expect(instance.canUndo).toBe(false);
+
+    await instance.importMedia([clip]);
+    expect(instance.project.assets).toHaveLength(1);
+    expect(instance.project.tracks.flatMap((track) => track.clips)).toHaveLength(1);
+    expect(instance.canUndo).toBe(true);
+
+    expect(await instance.undo()).toBe(true);
+    expect(instance.project.assets).toHaveLength(0);
+    expect(instance.project.tracks.flatMap((track) => track.clips)).toHaveLength(0);
+    expect(instance.canUndo).toBe(false);
+  });
+
+  it('rejects brand ids that could escape the workspace', async () => {
+    const dir = join(workDir, 'brand-traversal');
+    mkdirSync(dir, { recursive: true });
+    const instance = await studio(dir);
+    for (const id of ['../../projects/current', '..', 'a/b', 'a\\b', '/abs']) {
+      await expect(instance.brand(id)).rejects.toThrow(/Invalid brand id/);
+      await expect(
+        instance.saveBrand({ id, name: 'Bad', body: '', colors: [], fonts: [], updatedAt: '2026-01-01T00:00:00.000Z' }),
+      ).rejects.toThrow(/Invalid brand id/);
+    }
+    // Nothing was written for the rejected ids.
+    expect(existsSync(join(dir, 'workspace', 'brands'))).toBe(false);
+  });
+});
+
+describe('resolveBuiltinSkillsDir', () => {
+  it('prefers the explicit environment override', () => {
+    const custom = join(workDir, 'custom-skills');
+    mkdirSync(custom, { recursive: true });
+    const resolved = resolveBuiltinSkillsDir({
+      moduleDir: join(workDir, 'nowhere'),
+      cwd: workDir,
+      env: { EDITBAY_BUILTIN_SKILLS: custom },
+    });
+    expect(resolved).toBe(custom);
+  });
+
+  it('finds the bundled dist/skills copy next to the entry module', () => {
+    const bundle = join(workDir, 'bundle');
+    const skills = join(bundle, 'skills');
+    mkdirSync(join(skills, 'captions'), { recursive: true });
+    writeFileSync(join(skills, 'captions', 'SKILL.md'), '---\nid: captions\nname: Captions\n---\nBody\n', 'utf8');
+    const resolved = resolveBuiltinSkillsDir({ moduleDir: bundle, cwd: workDir, env: {} });
+    expect(resolved).toBe(skills);
+  });
+
+  it('ignores an empty skills folder and falls back to the repo resources', () => {
+    const bundle = join(workDir, 'empty-bundle');
+    mkdirSync(join(bundle, 'skills'), { recursive: true });
+    // The temp tree has no repo layout above it, so an empty copy means "none".
+    const resolved = resolveBuiltinSkillsDir({ moduleDir: bundle, cwd: bundle, env: {} });
+    expect(resolved).toBeUndefined();
+  });
+
+  it('finds the repo resources from a source checkout', () => {
+    const resolved = resolveBuiltinSkillsDir({ cwd: workDir, env: {} });
+    expect(resolved).toBe(join(root, 'apps', 'desktop', 'resources', 'skills'));
   });
 });

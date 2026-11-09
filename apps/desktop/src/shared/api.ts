@@ -61,6 +61,8 @@ export interface ChatMessageDTO {
 }
 
 export interface ChatRequestDTO {
+  /** Correlates the request with `llm.abort` so the main process can cancel it. */
+  requestId?: string;
   providerId: string;
   apiKey?: string;
   baseUrl?: string;
@@ -92,8 +94,9 @@ export interface EditbayApi {
   saveProject(content: string, path?: string): Promise<string | null>;
   saveProjectAs(content: string, defaultName: string): Promise<string | null>;
   secrets: {
-    get(key: string): Promise<string | null>;
-    set(key: string, value: string): Promise<void>;
+    /** Never returns key material; only whether a key is stored. */
+    has(key: string): Promise<boolean>;
+    set(key: string, value: string): Promise<{ encrypted: boolean }>;
     delete(key: string): Promise<void>;
   };
   workspace: {
@@ -107,6 +110,7 @@ export interface EditbayApi {
   };
   llm: {
     chat(req: ChatRequestDTO): Promise<ChatResponseDTO>;
+    abort(requestId: string): Promise<void>;
     listModels(providerId: string, apiKey: string, baseUrl?: string): Promise<Array<{ id: string; label: string }>>;
   };
   auth: {

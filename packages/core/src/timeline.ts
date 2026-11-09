@@ -31,7 +31,35 @@ export function clipTimelineDurationMs(clip: Clip): number {
   return Math.max(0, Math.round((clip.outMs - clip.inMs) / speed));
 }
 
-/** Timeline start of the clip at `index` on `track`. */
+/** A transition may not eat a whole clip: it leaves at least one millisecond. */
+export const MIN_TRANSITION_MARGIN_MS = 1;
+
+/**
+ * Usable transition overlap between two sequential clips. This is the single
+ * source of truth shared by the editor, the agent prompt, the MCP server and
+ * the export engine.
+ */
+export function clampTransitionOverlapMs(requestedMs: number, prevDurationMs: number, nextDurationMs: number): number {
+  if (!Number.isFinite(requestedMs) || requestedMs <= 0) return 0;
+  const max = Math.floor(Math.min(prevDurationMs, nextDurationMs) / 2);
+  if (max <= 0) return 0;
+  return Math.min(Math.round(requestedMs), max);
+}
+
+/** Overlap produced by `clip.transitionOut` towards the next clip. */
+export function transitionOverlapMs(clip: Clip, next: Clip | undefined): number {
+  if (!clip.transitionOut || !next) return 0;
+  return clampTransitionOverlapMs(
+    clip.transitionOut.durationMs,
+    clipTimelineDurationMs(clip),
+    clipTimelineDurationMs(next),
+  );
+}
+
+/**
+ * Timeline start of the clip at `index` on `track`. Sequential tracks pull each
+ * following clip back by the previous clip's transition overlap.
+ */
 export function clipStartMsOnTrack(track: Track, index: number): number {
   if (!isSequentialTrack(track)) {
     const clip = track.clips[index];
@@ -40,7 +68,8 @@ export function clipStartMsOnTrack(track: Track, index: number): number {
   let start = 0;
   for (let i = 0; i < index; i += 1) {
     const clip = track.clips[i];
-    if (clip) start += clipTimelineDurationMs(clip);
+    if (!clip) continue;
+    start += clipTimelineDurationMs(clip) - transitionOverlapMs(clip, track.clips[i + 1]);
   }
   return start;
 }
@@ -55,7 +84,10 @@ export function trackDurationMs(track: Track): number {
     return Math.round(end);
   }
   if (isSequentialTrack(track)) {
-    return clipStartMsOnTrack(track, track.clips.length);
+    const lastIndex = track.clips.length - 1;
+    const last = track.clips[lastIndex];
+    if (!last) return 0;
+    return Math.round(clipStartMsOnTrack(track, lastIndex) + clipTimelineDurationMs(last));
   }
   let end = 0;
   for (const clip of track.clips) {
@@ -64,13 +96,23 @@ export function trackDurationMs(track: Track): number {
   return Math.round(end);
 }
 
-/** Project duration: the furthest end point across all tracks. */
-export function timelineDurationMs(project: Project): number {
+/**
+ * Project duration: the furthest end across visible tracks. Hidden tracks are
+ * ignored, and a muted audio track must not stretch the export with silence.
+ */
+export function projectDurationMs(project: Project): number {
   let end = 0;
   for (const track of project.tracks) {
+    if (track.hidden) continue;
+    if (track.kind === 'audio' && track.muted) continue;
     end = Math.max(end, trackDurationMs(track));
   }
   return Math.round(end);
+}
+
+/** Backwards-compatible alias used across the app. */
+export function timelineDurationMs(project: Project): number {
+  return projectDurationMs(project);
 }
 
 /** Timeline start of a clip on the main video track, or null if not there. */

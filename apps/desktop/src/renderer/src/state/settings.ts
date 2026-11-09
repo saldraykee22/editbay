@@ -118,11 +118,18 @@ export function providerPreset(id: string): ProviderPreset {
   return PROVIDERS.find((p) => p.id === id) ?? PROVIDERS[0]!;
 }
 
-export async function getApiKey(providerId: string): Promise<string | null> {
-  return window.editbay.secrets.get(`provider.${providerId}.apiKey`);
+/** Raw keys never leave the main process; the renderer only learns presence. */
+export async function hasApiKey(providerId: string): Promise<boolean> {
+  return window.editbay.secrets.has(`provider.${providerId}.apiKey`);
 }
 
-export async function setApiKey(providerId: string, key: string): Promise<void> {
-  if (key.trim()) await window.editbay.secrets.set(`provider.${providerId}.apiKey`, key.trim());
-  else await window.editbay.secrets.delete(`provider.${providerId}.apiKey`);
+export async function setApiKey(
+  providerId: string,
+  key: string,
+): Promise<{ encrypted: boolean }> {
+  if (!key.trim()) {
+    await window.editbay.secrets.delete(`provider.${providerId}.apiKey`);
+    return { encrypted: false };
+  }
+  return window.editbay.secrets.set(`provider.${providerId}.apiKey`, key.trim());
 }

@@ -34,13 +34,17 @@ export class EditorStore {
 
   private version = 0;
   private listeners = new Set<() => void>();
-  private changeListeners = new Set<() => void>();
+  /** Fires only when the project document changes, so autosave ignores UI state. */
+  private projectListeners = new Set<() => void>();
   private playheadListeners = new Set<() => void>();
   private playheadVersion = 0;
+  private dirty = false;
+  private brandId: string | null = null;
+  private revision = 0;
 
   constructor(project?: Project) {
     this.session = new EditSession(project);
-    this.session.subscribe(() => this.bump());
+    this.session.subscribe(() => this.projectChanged());
   }
 
   get project(): Project {
@@ -51,6 +55,16 @@ export class EditorStore {
     return timelineDurationMs(this.project);
   }
 
+  /** True when the document has edits that are not written to a project file. */
+  get isDirty(): boolean {
+    return this.dirty;
+  }
+
+  /** Monotonic document revision used to detect edits during an async save. */
+  get projectRevision(): number {
+    return this.revision;
+  }
+
   subscribe = (listener: () => void): (() => void) => {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
@@ -58,15 +72,32 @@ export class EditorStore {
 
   getSnapshot = (): number => this.version;
 
+  /** Project-document subscriptions (autosave, exports, agent context). */
   onChange(listener: () => void): () => void {
-    this.changeListeners.add(listener);
-    return () => this.changeListeners.delete(listener);
+    this.projectListeners.add(listener);
+    return () => this.projectListeners.delete(listener);
   }
 
+  /** Re-render UI that depends on selection/playback state. */
   private bump(): void {
     this.version += 1;
     for (const listener of this.listeners) listener();
-    for (const listener of this.changeListeners) listener();
+  }
+
+  private projectChanged(): void {
+    // Undo snapshots predate brand attachment; keep the workspace link stable.
+    if (this.brandId && this.project.brandId !== this.brandId) this.project.brandId = this.brandId;
+    this.dirty = true;
+    this.revision += 1;
+    this.version += 1;
+    for (const listener of this.listeners) listener();
+    for (const listener of this.projectListeners) listener();
+  }
+
+  markSaved(): void {
+    if (!this.dirty) return;
+    this.dirty = false;
+    this.bump();
   }
 
   select(selection: Selection): void {
@@ -117,13 +148,27 @@ export class EditorStore {
     return this.session.redo();
   }
 
+  /**
+   * Brand identity is workspace metadata, not an undoable timeline edit, so it
+   * is attached to the document without pushing an undo snapshot.
+   */
+  setBrandId(brandId: string): void {
+    this.brandId = brandId;
+    if (this.project.brandId === brandId) return;
+    this.project.brandId = brandId;
+    this.projectChanged();
+  }
+
   load(project: Project, path: string | null = null): void {
+    this.brandId = project.brandId ?? null;
     this.session = new EditSession(project);
-    this.session.subscribe(() => this.bump());
+    this.session.subscribe(() => this.projectChanged());
     this.projectPath = path;
     this.selection = {};
     this.playheadMs = 0;
     this.playing = false;
+    this.dirty = false;
+    this.revision += 1;
     this.bump();
   }
 

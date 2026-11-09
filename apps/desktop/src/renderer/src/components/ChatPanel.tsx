@@ -30,6 +30,7 @@ export function ChatPanel({
   status,
   connected,
   onSend,
+  onStop,
   onApply,
   onDiscard,
   onOpenSettings,
@@ -39,6 +40,7 @@ export function ChatPanel({
   status: string;
   connected: boolean;
   onSend: (text: string) => void;
+  onStop: () => void;
   onApply: (id: string) => void;
   onDiscard: (id: string) => void;
   onOpenSettings: () => void;
@@ -194,6 +196,11 @@ export function ChatPanel({
           <Chip>{connected ? 'Ready' : 'No model'}</Chip>
           <div style={{ flex: 1 }} />
           <span className="kbd">Enter</span>
+          {busy ? (
+            <Button size="sm" variant="ghost" onClick={onStop} icon="x">
+              Stop
+            </Button>
+          ) : null}
           <Button size="sm" variant="primary" onClick={submit} disabled={busy || !text.trim()} icon="send">
             Send
           </Button>

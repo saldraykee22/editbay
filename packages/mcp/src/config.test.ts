@@ -1,4 +1,5 @@
-import { resolve } from 'node:path';
+import { existsSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { parseArgs, resolveConfig, toStudioOptions } from './config';
 
@@ -27,6 +28,12 @@ describe('mcp config', () => {
     const config = resolveConfig([], {}, CWD);
     expect(config.projectPath).toBe(resolve(CWD, 'editbay.json'));
     expect(config.workspaceRoot).toBeUndefined();
+  });
+
+  it('discovers builtin skills when no flag or env is set', () => {
+    const config = resolveConfig([], {}, CWD);
+    expect(config.builtinSkillsDir).toBeDefined();
+    expect(existsSync(join(config.builtinSkillsDir ?? '', 'captions', 'SKILL.md'))).toBe(true);
   });
 
   it('reads environment variables when flags are absent', () => {

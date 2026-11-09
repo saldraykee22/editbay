@@ -46,9 +46,23 @@ describe('FileMemoryStore', () => {
   it('rejects unsafe brand ids', async () => {
     const store = new FileMemoryStore(root);
     await expect(store.getBrand('../evil')).resolves.toBeNull();
+    await expect(store.getBrand('..')).resolves.toBeNull();
+    await expect(store.getBrand('nested/brand')).resolves.toBeNull();
+    await expect(store.getBrand('nested\\brand')).resolves.toBeNull();
+    await expect(store.getBrand('Brand')).resolves.toBeNull();
     await expect(
       store.saveBrand({
         id: '../evil',
+        name: 'Evil',
+        body: '',
+        colors: [],
+        fonts: [],
+        updatedAt: new Date().toISOString(),
+      }),
+    ).rejects.toThrow(/Invalid brand id/);
+    await expect(
+      store.saveBrand({
+        id: 'nested/evil',
         name: 'Evil',
         body: '',
         colors: [],

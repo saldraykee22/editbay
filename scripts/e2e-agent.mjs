@@ -1,8 +1,8 @@
 import { _electron as electron } from 'playwright';
 import { electronPath as electronPathFor } from './lib/electron-path.mjs';
-import { writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createDemoMedia, buildDemoProject } from './lib/demo.mjs';
+import { seedWorkspaceProject } from './lib/workspace.mjs';
 
 const root = resolve(import.meta.dirname, '..');
 const appDir = resolve(root, 'apps/desktop');
@@ -10,6 +10,7 @@ const electronPath = electronPathFor(root);
 
 const media = createDemoMedia(resolve(root, '.demo'));
 const project = buildDemoProject(media);
+seedWorkspaceProject(project);
 
 const app = await electron.launch({
   executablePath: electronPath,
@@ -18,10 +19,6 @@ const app = await electron.launch({
   env: { ...process.env, EDITBAY_FAKE_LLM: '1' },
 });
 const page = await app.firstWindow();
-await page.waitForTimeout(600);
-const info = await page.evaluate(() => window.editbay.appInfo());
-writeFileSync(resolve(info.workspaceRoot, 'projects/current.json'), JSON.stringify(project, null, 2), 'utf8');
-await page.reload();
 await page.waitForTimeout(1600);
 
 const before = await page.evaluate(() => document.body.innerText);

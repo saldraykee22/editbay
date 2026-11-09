@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Button, Chip, Field, Input, Section, Textarea } from '@editbay/ui';
+import { skills as skillStore } from '../state/workspace';
 
 interface SkillCard {
   id: string;
@@ -10,22 +11,6 @@ interface SkillCard {
   path: string;
 }
 
-function parseSkill(text: string, fallbackId: string): { name: string; description: string; triggers: string[]; body: string } {
-  const match = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/.exec(text);
-  if (!match) return { name: fallbackId, description: '', triggers: [], body: text };
-  const meta: Record<string, string> = {};
-  for (const line of (match[1] ?? '').split(/\r?\n/)) {
-    const idx = line.indexOf(':');
-    if (idx > 0) meta[line.slice(0, idx).trim()] = line.slice(idx + 1).trim();
-  }
-  const triggers = (meta['triggers'] ?? '')
-    .replace(/^\[|\]$/g, '')
-    .split(',')
-    .map((t) => t.trim().replace(/^["']|["']$/g, ''))
-    .filter(Boolean);
-  return { name: meta['name'] ?? fallbackId, description: meta['description'] ?? '', triggers, body: match[2] ?? '' };
-}
-
 export function SkillsPanel() {
   const [skills, setSkills] = useState<SkillCard[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
@@ -33,16 +18,17 @@ export function SkillsPanel() {
   const [form, setForm] = useState({ id: '', name: '', description: '', triggers: '', body: '' });
 
   const load = async () => {
-    const dirs = await window.editbay.workspace.list('skills');
-    const loaded: SkillCard[] = [];
-    for (const dir of dirs) {
-      const path = `${dir.name}/SKILL.md`;
-      const content = await window.editbay.workspace.read(`skills/${path}`);
-      if (!content) continue;
-      const parsed = parseSkill(content, dir.name);
-      loaded.push({ id: dir.name, ...parsed, path: `skills/${path}` });
-    }
-    setSkills(loaded.sort((a, b) => a.name.localeCompare(b.name)));
+    const list = await skillStore.list();
+    setSkills(
+      list.map((skill) => ({
+        id: skill.id,
+        name: skill.name,
+        description: skill.description,
+        triggers: skill.triggers,
+        body: skill.body,
+        path: `skills/${skill.id}/SKILL.md`,
+      })),
+    );
   };
 
   useEffect(() => {
@@ -52,12 +38,19 @@ export function SkillsPanel() {
   const create = async () => {
     const id = form.id.trim().replace(/[^a-z0-9-]+/gi, '-').toLowerCase();
     if (!id || !form.name.trim()) return;
-    const content = `---\nid: ${id}\nname: ${form.name.trim()}\ndescription: ${form.description.trim()}\ntriggers: [${form.triggers
-      .split(',')
-      .map((t) => t.trim())
-      .filter(Boolean)
-      .join(', ')}]\nversion: 1\nbuiltin: false\ncreated: ${new Date().toISOString()}\n---\n\n${form.body.trim()}\n`;
-    await window.editbay.workspace.write(`skills/${id}/SKILL.md`, content);
+    await skillStore.save({
+      id,
+      name: form.name.trim(),
+      description: form.description.trim(),
+      triggers: form.triggers
+        .split(',')
+        .map((trigger) => trigger.trim())
+        .filter(Boolean),
+      version: '1',
+      builtin: false,
+      createdAt: new Date().toISOString(),
+      body: form.body,
+    });
     setCreating(false);
     setForm({ id: '', name: '', description: '', triggers: '', body: '' });
     await load();

@@ -1,5 +1,11 @@
 import type { EffectInstance } from '@editbay/core';
-import type { EffectDefinition, EffectParam, TransitionDefinition } from './types';
+import type {
+  EffectCategory,
+  EffectDefinition,
+  EffectParam,
+  EffectParamSpec,
+  TransitionDefinition,
+} from './types';
 import { builtinEffects, builtinTransitions } from './builtins';
 
 export interface EffectCatalogInit {
@@ -74,26 +80,152 @@ export class EffectCatalog {
 export const effectCatalog = new EffectCatalog();
 
 /**
- * Compile a workspace effect module written by the agent.
- * The module source must assign a `const effect = { ... }` object (no imports,
- * no exports). It runs in the UI process only, in a function scope without DOM
- * handles; export quality falls back to a preview approximation unless the
- * module also supplies an `ffmpeg(params, meta)` function.
+ * Parse a declarative workspace effect (JSON authored by an agent).
+ *
+ * No source is evaluated: a custom effect is data — metadata, param specs and
+ * an optional static FFmpeg filter template. This closes the dynamic
+ * code-evaluation hole while still allowing workspace-defined looks.
  */
-export function compileCustomEffect(source: string): EffectDefinition {
-  const factory = new Function('helpers', `${source}\nreturn typeof effect !== 'undefined' ? effect : null;`);
-  const helpers = { clamp: (n: number, a: number, b: number) => Math.min(b, Math.max(a, n)) };
-  const result = factory(helpers) as EffectDefinition | null;
-  if (!result || typeof result !== 'object' || typeof result.id !== 'string') {
-    throw new Error('Effect module must define a `const effect = { id, name, params, style }` object');
+export function parseCustomEffect(json: unknown): EffectDefinition {
+  if (!isRecord(json)) throw new Error('Custom effect must be a JSON object');
+
+  const id = typeof json.id === 'string' ? json.id.trim() : '';
+  if (id === '') throw new Error('Custom effect needs a non-empty id');
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(id)) {
+    throw new Error('Custom effect id may only contain letters, digits, "-" and "_"');
   }
-  return {
-    ...result,
-    params: Array.isArray(result.params) ? result.params : [],
+
+  const name = typeof json.name === 'string' && json.name.trim() !== '' ? json.name.trim() : id;
+
+  const category = json.category;
+  if (typeof category !== 'string' || !EFFECT_CATEGORIES.includes(category as EffectCategory)) {
+    throw new Error(`Custom effect category must be one of ${EFFECT_CATEGORIES.join(', ')}`);
+  }
+
+  const rawParams = json.params === undefined ? [] : json.params;
+  if (!Array.isArray(rawParams)) throw new Error('Custom effect params must be an array');
+  const params = rawParams.map((entry, index) => parseParamSpec(entry, index));
+
+  const description = typeof json.description === 'string' ? json.description : '';
+
+  const rawFilter = json.filter;
+  if (rawFilter !== undefined && typeof rawFilter !== 'string') {
+    throw new Error('Custom effect filter must be a string');
+  }
+  const filter = typeof rawFilter === 'string' ? rawFilter.trim() : '';
+  if (filter !== '') validateFilterTemplate(filter);
+
+  const definition: EffectDefinition = {
+    id,
+    name,
+    category: category as EffectCategory,
+    description,
+    params,
     builtin: false,
-    id: result.id,
-    name: result.name || result.id,
-    category: result.category ?? 'motion',
-    description: result.description ?? '',
   };
+
+  if (filter !== '') {
+    definition.ffmpeg = (resolved) => renderFilterTemplate(filter, resolved);
+  }
+
+  return definition;
+}
+
+const EFFECT_CATEGORIES: readonly EffectCategory[] = ['motion', 'color', 'texture', 'audio'];
+const PARAM_TYPES: readonly EffectParamSpec['type'][] = ['number', 'color', 'select', 'boolean', 'text'];
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function parseParamSpec(value: unknown, index: number): EffectParamSpec {
+  if (!isRecord(value)) throw new Error(`Custom effect params[${index}] must be an object`);
+
+  const key = typeof value.key === 'string' ? value.key.trim() : '';
+  if (!key) throw new Error(`Custom effect params[${index}].key is required`);
+
+  const type = value.type;
+  if (typeof type !== 'string' || !PARAM_TYPES.includes(type as EffectParamSpec['type'])) {
+    throw new Error(`Custom effect params[${index}].type must be one of ${PARAM_TYPES.join(', ')}`);
+  }
+  const paramType = type as EffectParamSpec['type'];
+
+  const defaultValue = value.default;
+  if (paramType === 'number') {
+    if (typeof defaultValue !== 'number' || !Number.isFinite(defaultValue)) {
+      throw new Error(`Custom effect params[${index}].default must be a finite number`);
+    }
+  } else if (paramType === 'boolean') {
+    if (typeof defaultValue !== 'boolean') {
+      throw new Error(`Custom effect params[${index}].default must be a boolean`);
+    }
+  } else if (typeof defaultValue !== 'string') {
+    throw new Error(`Custom effect params[${index}].default must be a string`);
+  }
+
+  const label =
+    typeof value.label === 'string' && value.label.trim() !== '' ? value.label.trim() : key;
+  const spec: EffectParamSpec = {
+    key,
+    label,
+    type: paramType,
+    default: defaultValue as EffectParam,
+  };
+
+  for (const field of ['min', 'max', 'step'] as const) {
+    const candidate = value[field];
+    if (candidate === undefined) continue;
+    if (typeof candidate !== 'number' || !Number.isFinite(candidate)) {
+      throw new Error(`Custom effect params[${index}].${field} must be a finite number`);
+    }
+    spec[field] = candidate;
+  }
+  if (typeof value.unit === 'string') spec.unit = value.unit;
+
+  if (value.options !== undefined) {
+    if (!Array.isArray(value.options)) {
+      throw new Error(`Custom effect params[${index}].options must be an array`);
+    }
+    spec.options = value.options.map((option, optionIndex) => {
+      if (!isRecord(option) || typeof option.value !== 'string' || typeof option.label !== 'string') {
+        throw new Error(
+          `Custom effect params[${index}].options[${optionIndex}] needs string value and label`,
+        );
+      }
+      return { value: option.value, label: option.label };
+    });
+  }
+
+  return spec;
+}
+
+/** Templates must stay inside a single filter: no chaining or labels. */
+function validateFilterTemplate(filter: string): void {
+  if (filter.includes(';') || filter.includes('[') || filter.includes(']')) {
+    throw new Error('Custom effect filter must be a single filter without labels');
+  }
+  if (/[\r\n]/.test(filter)) throw new Error('Custom effect filter must be a single line');
+}
+
+/** `{param}` placeholders are filled from resolved params; no code is run. */
+function renderFilterTemplate(filter: string, params: Record<string, EffectParam>): string {
+  return filter.replace(/\{([A-Za-z0-9_-]+)\}/g, (placeholder, key: string) => {
+    const value = templateValue(params[key]);
+    return value === undefined ? placeholder : value;
+  });
+}
+
+function templateValue(value: EffectParam | undefined): string | undefined {
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) return undefined;
+    return String(Math.round(value * 1_000_000) / 1_000_000);
+  }
+  if (typeof value === 'boolean') return value ? '1' : '0';
+  if (typeof value === 'string') {
+    // Filter-syntax safe subset: no commas, quotes or parentheses, so a string
+    // param can never inject extra filters into the graph.
+    const safe = value.trim().replace(/[^A-Za-z0-9_.:@+/*-]/g, '');
+    return safe === '' ? undefined : safe;
+  }
+  return undefined;
 }

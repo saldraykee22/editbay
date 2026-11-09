@@ -2,10 +2,12 @@ import { _electron as electron } from 'playwright';
 import { resolve } from 'node:path';
 import { createDemoMedia } from './lib/demo.mjs';
 import { electronPath as electronPathFor } from './lib/electron-path.mjs';
+import { clearWorkspaceProject } from './lib/workspace.mjs';
 
 const root = resolve(import.meta.dirname, '..');
 const appDir = resolve(root, 'apps/desktop');
 const media = createDemoMedia(resolve(root, '.demo'));
+clearWorkspaceProject();
 
 const app = await electron.launch({
   executablePath: electronPathFor(root),
@@ -14,10 +16,6 @@ const app = await electron.launch({
   env: { ...process.env, EDITBAY_TEST_IMPORT: [media.clip1, media.clip2, media.music].join(';') },
 });
 const page = await app.firstWindow();
-await page.waitForTimeout(600);
-const info = await page.evaluate(() => window.editbay.appInfo());
-await page.evaluate(() => window.editbay.workspace.remove('projects/current.json'));
-await page.reload();
 await page.waitForTimeout(1200);
 
 await page.getByRole('button', { name: 'Import', exact: true }).click();

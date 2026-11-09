@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -30,6 +30,9 @@ interface ProjectPayload {
   tracks: Array<{
     id: string;
     kind: string;
+    name?: string;
+    muted: boolean;
+    hidden: boolean;
     clips: Array<{
       id: string;
       assetId: string;
@@ -37,10 +40,29 @@ interface ProjectPayload {
       inMs: number;
       outMs: number;
       startMs: number;
-      effects: Array<{ id: string; type: string }>;
+      speed: number;
+      volume: number;
+      transform: { x: number; y: number; scale: number; rotation: number; opacity: number };
+      transitionOut?: { id: string; type: string; durationMs: number; params: Record<string, unknown> };
+      audioFadeInMs: number;
+      audioFadeOutMs: number;
+      effects: Array<{
+        id: string;
+        type: string;
+        params: Record<string, unknown>;
+        startMs?: number;
+        durationMs?: number;
+      }>;
     }>;
   }>;
-  texts: Array<{ id: string; text: string; startMs: number; durationMs: number }>;
+  texts: Array<{
+    id: string;
+    text: string;
+    startMs: number;
+    durationMs: number;
+    style: { fontFamily: string; fontSize: number; color: string; align: string };
+    animation: string;
+  }>;
   summary: string;
 }
 
@@ -97,13 +119,15 @@ function seedProject(root: string): Project {
   return project;
 }
 
-async function createHarness(options: { seeded: boolean }): Promise<Harness> {
+async function createHarness(options: { seeded: boolean; project?: Project }): Promise<Harness> {
   const root = await mkdtemp(join(tmpdir(), 'editbay-mcp-'));
   roots.push(root);
 
   const projectPath = join(root, 'project', 'editbay.json');
   await mkdir(dirname(projectPath), { recursive: true });
-  if (options.seeded) {
+  if (options.project !== undefined) {
+    await writeFile(projectPath, JSON.stringify(options.project), 'utf8');
+  } else if (options.seeded) {
     await writeFile(projectPath, JSON.stringify(seedProject(root)), 'utf8');
   }
 
@@ -172,6 +196,8 @@ describe('editbay mcp server', () => {
     expect(text).toContain('trim_clip');
     expect(text).toContain('assetId');
     expect(text).toContain('Example batch');
+    expect(text).toContain('not composited');
+    expect(text).not.toContain('audio/overlay');
   });
 
   it('reads a project without leaking asset paths', async () => {
@@ -187,6 +213,9 @@ describe('editbay mcp server', () => {
     expect(project.durationMs).toBeGreaterThanOrEqual(2500);
     expect(project.texts).toHaveLength(1);
     expect(project.texts[0]?.text).toBe('Hello');
+    expect(project.texts[0]?.style.fontFamily).toBe('IBM Plex Sans');
+    expect(project.texts[0]?.style.fontSize).toBeGreaterThan(0);
+    expect(project.texts[0]?.animation).toBe('none');
 
     const videoTrack = project.tracks.find((track) => track.kind === 'video');
     expect(videoTrack?.clips).toHaveLength(1);
@@ -195,6 +224,15 @@ describe('editbay mcp server', () => {
     expect(videoTrack?.clips[0]?.inMs).toBe(500);
     expect(videoTrack?.clips[0]?.outMs).toBe(3000);
     expect(videoTrack?.clips[0]?.startMs).toBe(0);
+    expect(videoTrack?.clips[0]?.speed).toBe(1);
+    expect(videoTrack?.clips[0]?.volume).toBe(1);
+    expect(videoTrack?.clips[0]?.transform).toEqual({ x: 0, y: 0, scale: 1, rotation: 0, opacity: 1 });
+    expect(videoTrack?.clips[0]?.audioFadeInMs).toBe(0);
+    expect(videoTrack?.clips[0]?.audioFadeOutMs).toBe(0);
+    for (const track of project.tracks) {
+      expect(typeof track.muted).toBe('boolean');
+      expect(typeof track.hidden).toBe('boolean');
+    }
 
     const summary = JSON.parse(project.summary) as { project: string; duration: number };
     expect(summary.project).toBe('MCP seed');
@@ -232,6 +270,35 @@ describe('editbay mcp server', () => {
     const clip = project.tracks.find((track) => track.kind === 'video')?.clips[0];
     expect(clip?.inMs).toBe(1000);
     expect(clip?.outMs).toBe(2500);
+  });
+
+  it('returns createdIds from apply_commands', async () => {
+    const local = await createHarness({ seeded: true });
+    const reply = await call(local, 'apply_commands', {
+      commands: [
+        { op: 'add_text', text: 'Hook line', startMs: 0, durationMs: 1000 },
+        { op: 'split_clip', clipId: SEED_CLIP_ID, atMs: 1000 },
+      ],
+    });
+    expect(reply.isError).toBeFalsy();
+    const payload = jsonOf<{
+      results: Array<{ ok: boolean; op: string; createdIds?: Record<string, string> }>;
+    }>(reply);
+    expect(payload.results[0]?.createdIds?.item).toBeTruthy();
+    expect(payload.results[1]?.createdIds?.clip).toBeTruthy();
+    expect(payload.results[1]?.createdIds?.clip).not.toBe(SEED_CLIP_ID);
+  });
+
+  it('refuses to place media on an overlay track', async () => {
+    const project = jsonOf<ProjectPayload>(await call(harness, 'get_project'));
+    const overlay = project.tracks.find((track) => track.kind === 'overlay');
+    expect(overlay).toBeDefined();
+    const reply = await call(harness, 'import_media', {
+      paths: [join(harness.root, 'missing.mp4')],
+      trackId: overlay?.id,
+    });
+    expect(reply.isError).toBe(true);
+    expect(textOf(reply)).toContain('overlay track');
   });
 
   it('rejects an unknown op with an actionable tool error', async () => {
@@ -352,6 +419,21 @@ describe('editbay mcp server', () => {
     expect(brand.body).toContain('warm');
   });
 
+  it('rejects brand ids that could traverse out of the workspace', async () => {
+    for (const id of ['../../projects/current', '..', 'a/b', 'a\\b', '/abs']) {
+      const read = await call(harness, 'get_brand', { id });
+      expect(read.isError).toBe(true);
+      expect(textOf(read)).toContain('Invalid brand id');
+
+      const write = await call(harness, 'save_brand', { id, name: 'Bad', body: 'nope' });
+      expect(write.isError).toBe(true);
+      expect(textOf(write)).toContain('Invalid brand id');
+    }
+    // Only the legitimate brand directory exists; nothing escaped into it.
+    const brandDirs = await readdir(join(harness.root, 'workspace', 'brands'));
+    expect(brandDirs).toEqual(['acme-test']);
+  });
+
   it('returns a tool error when probing a missing file', async () => {
     const reply = await call(harness, 'probe_media', { path: join(harness.root, 'missing.mp4') });
     expect(reply.isError).toBe(true);
@@ -359,9 +441,126 @@ describe('editbay mcp server', () => {
   });
 });
 
+/** Two 2000 ms clips with a 500 ms crossfade plus full per-clip state. */
+function timelineProject(): Project {
+  const project = createEmptyProject('Timeline seed');
+  const video = project.tracks.find((track) => track.kind === 'video');
+  const text = project.tracks.find((track) => track.kind === 'text');
+  const audio = project.tracks.find((track) => track.kind === 'audio');
+  const overlay = project.tracks.find((track) => track.kind === 'overlay');
+  if (!video || !text || !audio || !overlay) throw new Error('empty project is missing expected tracks');
+
+  project.assets.push(
+    {
+      id: 'a_one',
+      kind: 'video',
+      uri: '/secret/one.mp4',
+      label: 'One',
+      durationMs: 2000,
+      width: 320,
+      height: 240,
+      fps: 30,
+      hasAudio: true,
+      origin: 'imported',
+    },
+    {
+      id: 'a_two',
+      kind: 'video',
+      uri: '/secret/two.mp4',
+      label: 'Two',
+      durationMs: 2000,
+      width: 320,
+      height: 240,
+      fps: 30,
+      hasAudio: true,
+      origin: 'imported',
+    },
+  );
+
+  video.clips.push({
+    id: 'c_one',
+    assetId: 'a_one',
+    inMs: 0,
+    outMs: 2000,
+    effects: [],
+    transitionOut: { id: 'tr_1', type: 'fade', durationMs: 500, params: { softness: 0.4 } },
+  });
+  video.clips.push({
+    id: 'c_two',
+    assetId: 'a_two',
+    inMs: 0,
+    outMs: 2000,
+    speed: 2,
+    volume: 0.5,
+    transform: { x: 0.1, y: -0.2, scale: 1.2, rotation: 5, opacity: 0.8 },
+    audioFadeInMs: 300,
+    audioFadeOutMs: 400,
+    effects: [{ id: 'e_1', type: 'grade', params: { contrast: 1.2, lut: 'warm' }, startMs: 100, durationMs: 600 }],
+  });
+  text.items.push({
+    id: 't_one',
+    text: 'Hook',
+    startMs: 0,
+    durationMs: 1200,
+    style: { ...DEFAULT_TEXT_STYLE, fontSize: 88, align: 'left' },
+    animation: 'rise',
+  });
+  audio.muted = true;
+  overlay.hidden = true;
+  return project;
+}
+
+describe('editbay mcp timeline (transitions)', () => {
+  let local: Harness;
+
+  beforeAll(async () => {
+    local = await createHarness({ seeded: false, project: timelineProject() });
+  });
+
+  it('uses core transition-aware clip starts and project duration', async () => {
+    const project = jsonOf<ProjectPayload>(await call(local, 'get_project'));
+    const video = project.tracks.find((track) => track.kind === 'video');
+    expect(video?.clips[1]?.startMs).toBe(1500);
+    expect(project.durationMs).toBe(2500);
+  });
+
+  it('returns the full clip, text and track state without leaking paths', async () => {
+    const reply = await call(local, 'get_project');
+    const raw = textOf(reply);
+    const project = JSON.parse(raw) as ProjectPayload;
+
+    const video = project.tracks.find((track) => track.kind === 'video');
+    expect(video?.clips[0]?.transitionOut).toEqual({
+      id: 'tr_1',
+      type: 'fade',
+      durationMs: 500,
+      params: { softness: 0.4 },
+    });
+    const second = video?.clips[1];
+    expect(second?.speed).toBe(2);
+    expect(second?.volume).toBe(0.5);
+    expect(second?.transform).toEqual({ x: 0.1, y: -0.2, scale: 1.2, rotation: 5, opacity: 0.8 });
+    expect(second?.audioFadeInMs).toBe(300);
+    expect(second?.audioFadeOutMs).toBe(400);
+    expect(second?.effects[0]?.params).toEqual({ contrast: 1.2, lut: 'warm' });
+    expect(second?.effects[0]?.startMs).toBe(100);
+    expect(second?.effects[0]?.durationMs).toBe(600);
+
+    expect(project.texts[0]?.style.fontSize).toBe(88);
+    expect(project.texts[0]?.style.align).toBe('left');
+    expect(project.texts[0]?.animation).toBe('rise');
+
+    expect(project.tracks.find((track) => track.kind === 'audio')?.muted).toBe(true);
+    expect(project.tracks.find((track) => track.kind === 'overlay')?.hidden).toBe(true);
+
+    expect(raw).not.toContain('/secret/');
+    expect(raw).not.toContain('one.mp4');
+    expect(raw).not.toContain('"uri"');
+  });
+});
+
 const ffmpegAvailable = isFfmpegAvailable();
 const ffmpegSuite = ffmpegAvailable ? describe : describe.skip;
-
 ffmpegSuite('editbay mcp server (real ffmpeg)', () => {
   let harness: Harness;
   let clipPath: string;

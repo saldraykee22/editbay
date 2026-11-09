@@ -77,7 +77,8 @@ async function loadJournal(ctx: CliContext): Promise<HistoryJournal> {
 async function saveJournal(ctx: CliContext, journal: HistoryJournal): Promise<void> {
   const file = journalPath(ctx);
   await fs.mkdir(dirname(file), { recursive: true });
-  const temp = `${file}.tmp`;
+  // A unique temp name keeps two concurrent CLI processes from colliding.
+  const temp = `${file}.${process.pid}.${Date.now()}.tmp`;
   await fs.writeFile(temp, JSON.stringify(journal), 'utf8');
   await fs.rename(temp, file);
 }
@@ -94,7 +95,7 @@ export async function recordHistory(ctx: CliContext, project: Project): Promise<
 /** Writes a snapshot back as the project file (atomic replace). */
 async function writeSnapshot(ctx: CliContext, snapshot: string): Promise<void> {
   await fs.mkdir(dirname(ctx.projectPath), { recursive: true });
-  const temp = `${ctx.projectPath}.tmp`;
+  const temp = `${ctx.projectPath}.${process.pid}.${Date.now()}.tmp`;
   await fs.writeFile(temp, snapshot, 'utf8');
   await fs.rename(temp, ctx.projectPath);
 }

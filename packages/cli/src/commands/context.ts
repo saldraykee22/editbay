@@ -3,11 +3,9 @@
  * studio construction and small formatting helpers.
  */
 
-import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { HeadlessStudio } from '@editbay/kit';
+import { join, resolve } from 'node:path';
+import { HeadlessStudio, resolveBuiltinSkillsDir as findBuiltinSkillsDir } from '@editbay/kit';
 import type { CliOptions } from '../args';
 
 export interface CliIo {
@@ -40,7 +38,6 @@ export class CliError extends Error {
 
 const DEFAULT_PROJECT = 'editbay.json';
 const DEFAULT_WORKSPACE = join(homedir(), '.editbay');
-const BUILTIN_SKILLS_RELATIVE = join('apps', 'desktop', 'resources', 'skills');
 
 function envPath(name: string): string | undefined {
   const value = process.env[name];
@@ -54,33 +51,12 @@ export function createContext(io: CliIo, options: CliOptions): CliContext {
 }
 
 /**
- * Builtin skill directory: the explicit env override wins; otherwise walk up
- * from this module (works unbundled under src/ and bundled under dist/) and
- * then from the working directory, looking for the desktop resources folder.
+ * Builtin skill directory shared with the MCP server: the explicit env
+ * override wins, then the `skills` copy bundled next to this entry point
+ * (`dist/skills`), then the repo `apps/desktop/resources/skills` layout.
  */
 export function resolveBuiltinSkillsDir(): string | undefined {
-  const fromEnv = envPath('EDITBAY_BUILTIN_SKILLS');
-  if (fromEnv !== undefined) return resolve(fromEnv);
-
-  const starts: string[] = [];
-  try {
-    starts.push(dirname(fileURLToPath(import.meta.url)));
-  } catch {
-    // import.meta.url is always available in ESM; keep the cwd fallback anyway.
-  }
-  starts.push(process.cwd());
-
-  for (const start of starts) {
-    let dir = resolve(start);
-    for (;;) {
-      const candidate = join(dir, BUILTIN_SKILLS_RELATIVE);
-      if (existsSync(candidate)) return candidate;
-      const parent = dirname(dir);
-      if (parent === dir) break;
-      dir = parent;
-    }
-  }
-  return undefined;
+  return findBuiltinSkillsDir();
 }
 
 /** Opens (and, when missing, creates) the project through HeadlessStudio. */

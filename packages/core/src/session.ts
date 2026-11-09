@@ -6,7 +6,7 @@
  */
 
 import { applyCommand, applyCommands } from './commands';
-import { createEmptyProject } from './project';
+import { createEmptyProject, validateProject } from './project';
 import type { ApplyResult, BatchResult, EditCommand, Project } from './types';
 
 const HISTORY_LIMIT = 200;
@@ -51,6 +51,8 @@ export class EditSession {
       throw new Error('Invalid project JSON');
     }
     if (!isProject(parsed)) throw new Error('Invalid project JSON');
+    const problems = validateProject(parsed);
+    if (problems.length > 0) throw new Error(`Invalid project JSON: ${problems[0]}`);
     return new EditSession(parsed);
   }
 

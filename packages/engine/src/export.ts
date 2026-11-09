@@ -8,7 +8,7 @@
  */
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { mkdir, mkdtemp, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { Project } from '@editbay/core';
@@ -24,12 +24,51 @@ export interface ExportProjectOptions extends ExportOptions {
   fontPath?: string;
   /** Parent directory for temporary drawtext files. */
   textFileDir?: string;
+  /** Pin the H.264 encoder instead of probing `ffmpeg -encoders`. */
+  videoEncoder?: string;
 }
 
 function abortError(): Error {
   const error = new Error('Export aborted');
   error.name = 'AbortError';
   return error;
+}
+
+const RETRYABLE_RM_CODES = new Set(['EBUSY', 'EPERM', 'ENOTEMPTY', 'EACCES']);
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Windows releases file handles asynchronously after a killed process exits, so
+ * an immediate `rm` can fail with EBUSY/EPERM. Retry briefly before giving up.
+ */
+export async function removeWithRetry(target: string, opts: { recursive?: boolean } = {}): Promise<void> {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    try {
+      await rm(target, { force: true, recursive: opts.recursive ?? false });
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === undefined || !RETRYABLE_RM_CODES.has(code)) return;
+      if (attempt === 4) return;
+      await delay(40 * (attempt + 1));
+    }
+  }
+}
+
+/** `rename` within a volume, `copyFile` + `rm` across volumes (Windows EXDEV). */
+async function moveIntoPlace(tempPath: string, outPath: string): Promise<void> {
+  try {
+    await rename(tempPath, outPath);
+    return;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== 'EXDEV' && code !== 'EPERM' && code !== 'EBUSY' && code !== 'EACCES') throw error;
+  }
+  await copyFile(tempPath, outPath);
+  await removeWithRetry(tempPath);
 }
 
 /** Fill `hasAudio` for assets the project never probed (pure plan stays pure). */
@@ -127,7 +166,9 @@ export async function exportProject(project: Project, options: ExportProjectOpti
   if (!outPath) throw new Error('Export requires an output path');
 
   await mkdir(path.dirname(outPath), { recursive: true });
-  const tempOut = `${outPath}.tmp-${randomBytes(4).toString('hex')}.mp4`;
+  // Temp output lives in the OS temp dir: an aborted Windows export can leave a
+  // locked file behind, and it must never land in the user's output folder.
+  const tempOut = path.join(tmpdir(), `editbay-export-${randomBytes(6).toString('hex')}.mp4`);
   const textRoot = options.textFileDir ?? tmpdir();
   await mkdir(textRoot, { recursive: true });
   const textFileDir = await mkdtemp(path.join(textRoot, 'editbay-export-'));
@@ -151,6 +192,7 @@ export async function exportProject(project: Project, options: ExportProjectOpti
       outPath: tempOut,
       textFileDir,
       fontPath: options.fontPath,
+      videoEncoder: options.videoEncoder,
     });
 
     await Promise.all(
@@ -206,17 +248,18 @@ export async function exportProject(project: Project, options: ExportProjectOpti
 
     if (aborted || options.signal?.aborted) throw abortError();
 
-    await rename(tempOut, outPath);
+    await moveIntoPlace(tempOut, outPath);
     const info = await stat(outPath);
     return {
       outPath,
       durationMs: plan.durationMs,
       sizeBytes: info.size,
       elapsedMs: Date.now() - startedAt,
+      videoEncoder: plan.videoEncoder,
     };
   } finally {
     options.signal?.removeEventListener('abort', onAbort);
-    await rm(tempOut, { force: true }).catch(() => undefined);
-    await rm(textFileDir, { recursive: true, force: true }).catch(() => undefined);
+    await removeWithRetry(tempOut);
+    await removeWithRetry(textFileDir, { recursive: true });
   }
 }

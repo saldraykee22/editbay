@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Agent } from '@editbay/harness/agent';
-import type { AgentRuntime } from '@editbay/harness/types';
+import type { AgentRuntime, AgentTurnInput } from '@editbay/harness/types';
 import { applyCommands, describeChanges, type AgentCommand, type EditCommand } from '@editbay/core';
 import { effectCatalog } from '@editbay/effects';
 import type { ChatEntry } from '../components/ChatPanel';
 import type { EditorStore } from './store';
-import { providerPreset, getApiKey, type AppSettings } from './settings';
+import { providerPreset, hasApiKey, type AppSettings } from './settings';
 import { memory, receipts, skills, workspace, IpcProvider } from './workspace';
 
 function isEditCommand(command: AgentCommand): command is EditCommand {
@@ -28,10 +28,17 @@ export interface AgentController {
   status: string;
   connected: boolean;
   send: (text: string) => void;
+  stop: () => void;
   applyProposal: (id: string) => void;
   discardProposal: (id: string) => void;
   clear: () => void;
 }
+
+/**
+ * `AgentTurnInput` gains `signal` in the harness; the intersection keeps this
+ * renderer compiling against both the old and the new shape.
+ */
+type TurnInput = AgentTurnInput & { signal?: AbortSignal };
 
 export function useAgentController({ store, settings }: { store: EditorStore; settings: AppSettings }): AgentController {
   const [entries, setEntries] = useState<ChatEntry[]>([]);
@@ -39,7 +46,7 @@ export function useAgentController({ store, settings }: { store: EditorStore; se
   const [status, setStatus] = useState('');
   const [connected, setConnected] = useState(false);
   const proposals = useRef(new Map<string, AgentCommand[]>());
-  const abortRef = useRef<{ cancelled: boolean }>({ cancelled: false });
+  const controllerRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -49,7 +56,7 @@ export function useAgentController({ store, settings }: { store: EditorStore; se
         if (alive) setConnected(true);
         return;
       }
-      const key = await getApiKey(settings.providerId);
+      const key = await hasApiKey(settings.providerId);
       if (alive) setConnected(Boolean(key));
     })();
     return () => {
@@ -94,21 +101,23 @@ export function useAgentController({ store, settings }: { store: EditorStore; se
         maxSteps: 10,
       });
 
-      const turn = { cancelled: false };
-      abortRef.current = turn;
+      const turn = new AbortController();
+      controllerRef.current = turn;
 
       void (async () => {
         let lastMessage = '';
         try {
-          for await (const event of agent.run({
+          const input: TurnInput = {
             text: value,
             selection: {
               clipId: store.selection.clipId,
               itemId: store.selection.itemId,
               playheadMs: store.playheadMs,
             },
-          })) {
-            if (turn.cancelled) break;
+            signal: turn.signal,
+          };
+          for await (const event of agent.run(input)) {
+            if (turn.signal.aborted) break;
             if (event.type === 'status') {
               setStatus(event.text);
             } else if (event.type === 'message') {
@@ -139,12 +148,15 @@ export function useAgentController({ store, settings }: { store: EditorStore; se
               const okCount = event.results.filter((result) => result.ok).length;
               setStatus(`Applied ${okCount} change${okCount === 1 ? '' : 's'}`);
             } else if (event.type === 'error') {
-              push({ id: newId(), kind: 'error', text: event.message });
+              if (!turn.signal.aborted) push({ id: newId(), kind: 'error', text: event.message });
             }
           }
         } catch (error) {
-          push({ id: newId(), kind: 'error', text: error instanceof Error ? error.message : String(error) });
+          if (!turn.signal.aborted) {
+            push({ id: newId(), kind: 'error', text: error instanceof Error ? error.message : String(error) });
+          }
         } finally {
+          if (controllerRef.current === turn) controllerRef.current = null;
           setBusy(false);
           setStatus('');
         }
@@ -152,6 +164,11 @@ export function useAgentController({ store, settings }: { store: EditorStore; se
     },
     [busy, push, settings, store],
   );
+
+  const stop = useCallback(() => {
+    controllerRef.current?.abort();
+    setStatus('Stopping…');
+  }, []);
 
   const applyProposal = useCallback(
     (id: string) => {
@@ -190,5 +207,5 @@ export function useAgentController({ store, settings }: { store: EditorStore; se
     proposals.current.clear();
   }, []);
 
-  return { entries, busy, status, connected, send, applyProposal, discardProposal, clear };
+  return { entries, busy, status, connected, send, stop, applyProposal, discardProposal, clear };
 }

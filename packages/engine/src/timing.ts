@@ -8,6 +8,7 @@
  * All values are integer milliseconds unless a name ends in `Sec`.
  */
 import type { Clip, Project, TextItem, Track } from '@editbay/core';
+import { clampTransitionOverlapMs } from '@editbay/core';
 import { effectCatalog } from '@editbay/effects';
 
 export const DEFAULT_TRANSITION_MS = 400;
@@ -66,10 +67,7 @@ export function transitionXfadeName(type: string): string {
 
 /** A transition may not eat a whole clip: it is clamped to leave a frame. */
 export function clampTransitionMs(requestedMs: number, prevDurationMs: number, nextDurationMs: number): number {
-  if (!Number.isFinite(requestedMs) || requestedMs <= 0) return 0;
-  const max = Math.min(prevDurationMs, nextDurationMs) - MIN_TRANSITION_MARGIN_MS;
-  if (max <= 0) return 0;
-  return Math.min(Math.round(requestedMs), max);
+  return clampTransitionOverlapMs(requestedMs, prevDurationMs, nextDurationMs);
 }
 
 /**
@@ -143,6 +141,7 @@ export function projectDurationMs(project: Project): number {
 
   for (const track of project.tracks) {
     if (track.hidden) continue;
+    if (track.kind === 'audio' && track.muted) continue;
     if (track.kind === 'text') {
       for (const item of track.items) duration = Math.max(duration, item.startMs + item.durationMs);
     } else {
