@@ -422,6 +422,9 @@ const AUDIO_NORMALIZE: readonly string[] = [
   'aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo',
 ];
 
+/** Fade-out applied when a music/voice-over clip is cut at the project end. */
+export const AUTO_CUT_FADE_MS = 300;
+
 /** atempo only supports 0.5..2, so extreme speeds are chained. */
 export function atempoChain(speed: number): string[] {
   if (!Number.isFinite(speed) || speed <= 0) return [];
@@ -665,8 +668,11 @@ export function buildRenderPlan(project: Project, options: RenderPlanOptions): E
 
   /* Audio ----------------------------------------------------------- */
   const audioLabels: string[] = [];
+  const projectEndMs = projectDurationMs(project);
 
-  for (const entry of mainTimeline.clips) {
+  for (let index = 0; index < mainTimeline.clips.length; index += 1) {
+    const entry = mainTimeline.clips[index];
+    if (!entry) continue;
     const clip = entry.clip;
     const asset = assetFor(clip);
     const volume = clip.volume ?? 1;
@@ -677,8 +683,19 @@ export function buildRenderPlan(project: Project, options: RenderPlanOptions): E
     const startSec = entry.startMs / 1000;
     const durationMs = entry.durationMs;
     const durationSec = durationMs / 1000;
-    const fadeInMs = Math.max(0, clip.audioFadeInMs ?? 0);
-    const fadeOutMs = Math.max(0, clip.audioFadeOutMs ?? 0);
+    // The picture crossfades over the transition window, so the clip audio has
+    // to do the same: the outgoing clip fades out over the overlap while the
+    // incoming clip — delayed to the xfade offset by `adelay` below — fades in
+    // over it. An explicit fade longer than the transition wins.
+    const transitionInMs = index > 0 ? (mainTimeline.clips[index - 1]?.transitionOutMs ?? 0) : 0;
+    const fadeInMs = Math.min(
+      durationMs,
+      Math.max(Math.max(0, clip.audioFadeInMs ?? 0), transitionInMs),
+    );
+    const fadeOutMs = Math.min(
+      durationMs,
+      Math.max(Math.max(0, clip.audioFadeOutMs ?? 0), entry.transitionOutMs),
+    );
 
     const audioFilters = [
       `[${inputIndex}:a]atrim=start=0.000:end=${sec(clip.outMs - clip.inMs)}`,
@@ -690,9 +707,9 @@ export function buildRenderPlan(project: Project, options: RenderPlanOptions): E
       ...(entry.startMs > 0 ? [`adelay=${entry.startMs}|${entry.startMs}`] : []),
       // Clip-level fades apply to the clip's own audio just like audio tracks.
       ...(fadeInMs > 0
-        ? [`afade=t=in:st=${startSec.toFixed(3)}:d=${(Math.min(fadeInMs, durationMs) / 1000).toFixed(3)}`]
+        ? [`afade=t=in:st=${startSec.toFixed(3)}:d=${(fadeInMs / 1000).toFixed(3)}`]
         : []),
-      ...(fadeOutMs > 0 && fadeOutMs <= durationMs
+      ...(fadeOutMs > 0
         ? [
             `afade=t=out:st=${(startSec + durationSec - fadeOutMs / 1000).toFixed(3)}:d=${(
               fadeOutMs / 1000
@@ -722,27 +739,47 @@ export function buildRenderPlan(project: Project, options: RenderPlanOptions): E
         warnings.push(`Asset "${asset.label}" has no audio and was skipped on the audio track.`);
         continue;
       }
-      const durationMs = clipDurationMs(clip);
-      const inputIndex = addInput(assetPath, false, durationMs, { inMs: clip.inMs, outMs: clip.outMs });
       const startMs = Math.max(0, clip.startMs ?? 0);
+      const placedDurationMs = clipDurationMs(clip);
+      // Audio never extends the export: a bed that runs past the picture is
+      // cut at the project end, and only a clip that starts after the picture
+      // is dropped altogether.
+      if (startMs >= projectEndMs) {
+        warnings.push(
+          `Audio clip "${asset.label}" starts at ${startMs} ms, after the project ends (${projectEndMs} ms), and was skipped.`,
+        );
+        continue;
+      }
+      const cutAtProjectEnd = startMs + placedDurationMs > projectEndMs;
+      const durationMs = cutAtProjectEnd ? projectEndMs - startMs : placedDurationMs;
+      const speed = clampSpeed(clip.speed);
+      // `atrim` works in source time, so a shortened clip keeps the matching
+      // source span after the speed change.
+      const sourceSpanMs = cutAtProjectEnd
+        ? Math.min(clip.outMs - clip.inMs, Math.round(durationMs * speed))
+        : clip.outMs - clip.inMs;
+      const inputIndex = addInput(assetPath, false, durationMs, { inMs: clip.inMs, outMs: clip.outMs });
       const startSec = startMs / 1000;
       const durationSec = durationMs / 1000;
-      const fadeInMs = Math.max(0, clip.audioFadeInMs ?? 0);
-      const fadeOutMs = Math.max(0, clip.audioFadeOutMs ?? 0);
+      const fadeInMs = Math.min(durationMs, Math.max(0, clip.audioFadeInMs ?? 0));
+      let fadeOutMs = Math.min(durationMs, Math.max(0, clip.audioFadeOutMs ?? 0));
+      if (cutAtProjectEnd) {
+        // Never cut a live audio bed without a ramp: 300 ms of fade-out unless
+        // the user already asked for a longer one.
+        fadeOutMs = Math.max(fadeOutMs, Math.min(AUTO_CUT_FADE_MS, durationMs));
+      }
 
       const audioFilters = [
-        `[${inputIndex}:a]atrim=start=0.000:end=${sec(clip.outMs - clip.inMs)}`,
+        `[${inputIndex}:a]atrim=start=0.000:end=${sec(sourceSpanMs)}`,
         'asetpts=PTS-STARTPTS',
         `volume=${num(volume)}`,
-        ...atempoChain(clampSpeed(clip.speed)),
+        ...atempoChain(speed),
         `adelay=${startMs}|${startMs}`,
       ];
       if (fadeInMs > 0) {
-        audioFilters.push(
-          `afade=t=in:st=${startSec.toFixed(3)}:d=${(Math.min(fadeInMs, durationMs) / 1000).toFixed(3)}`,
-        );
+        audioFilters.push(`afade=t=in:st=${startSec.toFixed(3)}:d=${(fadeInMs / 1000).toFixed(3)}`);
       }
-      if (fadeOutMs > 0 && fadeOutMs <= durationMs) {
+      if (fadeOutMs > 0) {
         const fadeOutStart = startSec + durationSec - fadeOutMs / 1000;
         audioFilters.push(`afade=t=out:st=${fadeOutStart.toFixed(3)}:d=${(fadeOutMs / 1000).toFixed(3)}`);
       }

@@ -160,6 +160,30 @@ describe('buildSystemPrompt', () => {
     expect(summary.durationMs).toBe(3500);
   });
 
+  it('reports the picture duration even when a music bed is longer', () => {
+    const withMusic: Project = {
+      ...project,
+      assets: [
+        ...project.assets,
+        { id: 'music-1', kind: 'audio', uri: '/media/music.m4a', label: 'music', durationMs: 60_000 },
+      ],
+      tracks: [
+        ...project.tracks,
+        {
+          id: 'audio-1',
+          kind: 'audio',
+          clips: [{ id: 'music-clip', assetId: 'music-1', inMs: 0, outMs: 60_000, startMs: 0, effects: [] }],
+          items: [],
+        },
+      ],
+    };
+
+    const summary = summarizeProject(withMusic);
+
+    // The model must see the same length the export will produce.
+    expect(summary.durationMs).toBe(5000);
+  });
+
   it('escapes fences and wraps untrusted project, brand and skill data', () => {
     const injected: Project = {
       ...project,

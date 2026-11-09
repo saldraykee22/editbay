@@ -1,5 +1,5 @@
 import type { Project } from '@editbay/core';
-import { clipStartMsOnTrack, trackDurationMs } from '@editbay/core';
+import { clipStartMsOnTrack, projectDurationMs, trackDurationMs } from '@editbay/core';
 import type { AgentSettings, BrandProfile, Skill } from './types';
 
 export interface PromptSelection {
@@ -110,7 +110,8 @@ export function summarizeProject(
   return {
     name: project.name,
     canvas: { ...project.canvas },
-    durationMs: tracks.reduce((max, track) => Math.max(max, track.durationMs), 0),
+    // Same rule as export and preview: audio never stretches the project.
+    durationMs: projectDurationMs(project),
     ...(project.brandId !== undefined ? { brandId: project.brandId } : {}),
     assets,
     tracks: tracks.map((track) => ({

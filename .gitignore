@@ -20,6 +20,10 @@ archive/**/.gradle/
 apps/desktop/out/
 release-fix/
 
+# FFmpeg binaries are fetched, never committed (see docs/licensing.md)
+apps/desktop/resources/ffmpeg/*
+!apps/desktop/resources/ffmpeg/.gitkeep
+
 evals/.media/
 evals/reports/
 packages/*/dist/

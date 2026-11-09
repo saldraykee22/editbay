@@ -23,6 +23,7 @@ Rules that keep this honest:
 - `text` items use `startMs` / `durationMs`.
 - Clip duration = `(outMs - inMs) / speed`.
 - Transitions live on the outgoing clip (`transitionOut`) and consume overlap at export.
+- Project duration is `projectDurationMs()` from `packages/core`: the end of the picture (video tracks with transition overlap subtracted, overlay clips, text items). Audio tracks never extend it — a longer music bed is cut at the project end with an automatic 300 ms fade-out — and only an audio-only project is measured by its audio. Preview, export, CLI and the agent summary all read that one function.
 
 ## Rendering
 
@@ -32,7 +33,7 @@ Rules that keep this honest:
 2. Per clip: trim → speed → fps → scale/crop to canvas → effect filters → transform.
 3. Adjacent clips with `transitionOut` are chained with `xfade`.
 4. Text items become `drawtext` with a temp text file (no escaping bugs) and `enable='between(t,…)'`.
-5. Audio: clip audio + music tracks → `amix` with `normalize=0`.
+5. Audio: clip audio + music tracks → `amix` with `normalize=0`. Audio-track clips are cut at the project end (with a 300 ms fade-out when they are shortened) and clip audio crossfades over every `transitionOut` window, delayed to the same xfade offset as the picture.
 6. Encode: H.264 yuv420p, AAC 48 kHz, `+faststart`.
 
 Preview is a Canvas 2D compositor that resolves the same effect definitions (`style()`) instead of FFmpeg filters. Preview is an approximation; **export is the reference** — the UI says so.

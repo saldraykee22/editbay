@@ -8,7 +8,7 @@
  * All values are integer milliseconds unless a name ends in `Sec`.
  */
 import type { Clip, Project, TextItem, Track } from '@editbay/core';
-import { clampTransitionOverlapMs } from '@editbay/core';
+import { clampTransitionOverlapMs, projectDurationMs as coreProjectDurationMs } from '@editbay/core';
 import { effectCatalog } from '@editbay/effects';
 
 export const DEFAULT_TRANSITION_MS = 400;
@@ -131,23 +131,11 @@ export function placedClipEndMs(clip: Clip): number {
 }
 
 /**
- * Full project duration: the main video track (transitions included) or the
- * furthest placed element, whichever ends later.
+ * Full project duration. Delegates to `@editbay/core` so the export, the
+ * preview, the agent summary and the CLI can never disagree: the picture
+ * (video with transitions, overlay, text) defines the length, audio is cut at
+ * that point, and only an audio-only project is measured by its audio.
  */
 export function projectDurationMs(project: Project): number {
-  let duration = 0;
-  const main = mainVideoTrack(project);
-  if (main) duration = timelineOf(main.clips).durationMs;
-
-  for (const track of project.tracks) {
-    if (track.hidden) continue;
-    if (track.kind === 'audio' && track.muted) continue;
-    if (track.kind === 'text') {
-      for (const item of track.items) duration = Math.max(duration, item.startMs + item.durationMs);
-    } else {
-      for (const clip of track.clips) duration = Math.max(duration, placedClipEndMs(clip));
-    }
-  }
-
-  return Math.max(0, duration);
+  return coreProjectDurationMs(project);
 }

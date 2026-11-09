@@ -97,14 +97,35 @@ export function trackDurationMs(track: Track): number {
 }
 
 /**
- * Project duration: the furthest end across visible tracks. Hidden tracks are
- * ignored, and a muted audio track must not stretch the export with silence.
+ * End of the visible picture: video tracks (transition overlaps already
+ * subtracted), overlay clips and text items. Audio tracks never contribute.
  */
-export function projectDurationMs(project: Project): number {
+export function visualDurationMs(project: Project): number {
   let end = 0;
   for (const track of project.tracks) {
     if (track.hidden) continue;
-    if (track.kind === 'audio' && track.muted) continue;
+    if (track.kind === 'audio') continue;
+    end = Math.max(end, trackDurationMs(track));
+  }
+  return Math.round(end);
+}
+
+/**
+ * Project duration: the furthest end of the visible content.
+ *
+ * Audio tracks deliberately do not extend the project — a music bed longer
+ * than the picture is trimmed at export (with an automatic fade-out) instead
+ * of leaving a black tail. A muted track never counts. Only when there is no
+ * video, overlay or text at all does the audio define the duration, so an
+ * audio-only project still has a length.
+ */
+export function projectDurationMs(project: Project): number {
+  const visual = visualDurationMs(project);
+  if (visual > 0) return visual;
+
+  let end = 0;
+  for (const track of project.tracks) {
+    if (track.hidden || track.kind !== 'audio' || track.muted) continue;
     end = Math.max(end, trackDurationMs(track));
   }
   return Math.round(end);

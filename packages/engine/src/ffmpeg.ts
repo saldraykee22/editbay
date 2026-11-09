@@ -111,12 +111,14 @@ export function resolveFfprobe(opts: ResolveFfmpegOptions = {}): string {
 
 /** Which discovery branch produced a path (for diagnostics in the UI). */
 export function ffmpegSource(ffmpegPath: string): FfmpegInfo['source'] {
+  // A bundled build lives under the app's `resources` directory. Check this
+  // before EDITBAY_FFMPEG because the main process points that variable at the
+  // bundled binary at startup, and the UI should still say "bundled".
+  if (/[\\/]resources[\\/]/i.test(ffmpegPath)) return 'bundled';
+  const bundled = bundledCandidates(EXECUTABLE);
+  if (bundled.some((candidate) => candidate === ffmpegPath)) return 'bundled';
   const env = process.env.EDITBAY_FFMPEG;
   if (env && binaryIn(env, EXECUTABLE) === ffmpegPath) return 'env';
-  const bundled = bundledCandidates(EXECUTABLE);
-  if (bundled.some((candidate) => candidate === ffmpegPath) || ffmpegPath.includes(`${path.sep}resources${path.sep}`)) {
-    return 'bundled';
-  }
   return 'path';
 }
 

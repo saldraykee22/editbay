@@ -29,6 +29,7 @@
     "eval": "tsx evals/run.ts",
     "build:cli": "pnpm --filter @editbay/cli build",
     "build:mcp": "pnpm --filter @editbay/mcp build",
+    "fetch:ffmpeg": "node scripts/fetch-ffmpeg.mjs",
     "format": "prettier --write ."
   },
   "devDependencies": {

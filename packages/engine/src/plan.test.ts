@@ -124,22 +124,25 @@ describe('timing', () => {
     expect(timeline.durationMs).toBe(3500);
   });
 
-  it('reports project duration including trailing audio', () => {
+  it('skips an audio clip that starts after the project ends', () => {
     const project = makeProject({
       clips: [makeClip('c1', 'a1', { outMs: 1000 })],
       audioClips: [makeClip('c2', 'a3', { startMs: 2000, outMs: 3000 })],
       assets: [makeAsset('a1'), makeAsset('a3', 'audio')],
     });
-    expect(planFor(project).durationMs).toBe(5000);
+    const plan = planFor(project);
+    expect(plan.durationMs).toBe(1000);
+    expect(plan.inputs).toEqual(['C:/media/a1.mp4']);
+    expect(plan.warnings.some((warning) => warning.includes('after the project ends'))).toBe(true);
   });
 
-  it('ignores muted audio tracks when measuring project duration', () => {
+  it('measures the project by its picture, not by a long music bed', () => {
     const project = makeProject({
       clips: [makeClip('c1', 'a1', { outMs: 5000 })],
       audioClips: [makeClip('c2', 'a3', { outMs: 60_000 })],
       assets: [makeAsset('a1'), makeAsset('a3', 'audio')],
     });
-    expect(projectDurationMs(project)).toBe(60_000);
+    expect(projectDurationMs(project)).toBe(5000);
 
     const audioTrack = project.tracks.find((track) => track.kind === 'audio');
     expect(audioTrack).toBeDefined();
@@ -522,7 +525,7 @@ describe('buildRenderPlan: audio', () => {
 
   it('delays audio-track clips and applies fades', () => {
     const project = makeProject({
-      clips: [makeClip('c1', 'a1', { outMs: 1000 })],
+      clips: [makeClip('c1', 'a1', { outMs: 2000 })],
       assets: [makeAsset('a1'), makeAsset('a3', 'audio')],
       audioClips: [
         makeClip('c2', 'a3', {
@@ -589,11 +592,95 @@ describe('buildRenderPlan: audio', () => {
   it('applies a full-length fade-out on an audio-track clip', () => {
     const project = makeProject({
       assets: [makeAsset('a1'), makeAsset('a3', 'audio')],
-      clips: [makeClip('c1', 'a1', { outMs: 1000 })],
+      clips: [makeClip('c1', 'a1', { outMs: 2000 })],
       audioClips: [makeClip('c2', 'a3', { outMs: 1200, audioFadeOutMs: 1200 })],
     });
     const plan = planFor(project);
     expect(plan.filterGraph).toContain('afade=t=out:st=0.000:d=1.200');
+  });
+
+  it('leaves a music bed that ends before the picture untouched', () => {
+    const project = makeProject({
+      assets: [makeAsset('a1'), makeAsset('a3', 'audio')],
+      clips: [makeClip('c1', 'a1', { outMs: 7000 })],
+      audioClips: [makeClip('c2', 'a3', { outMs: 3000 })],
+    });
+    const plan = planFor(project);
+    expect(plan.durationMs).toBe(7000);
+    expect(plan.filterGraph).toContain('atrim=start=0.000:end=3.000');
+    expect(plan.filterGraph).not.toContain('afade=t=out');
+    expect(plan.filterGraph).not.toContain('afade=t=in');
+  });
+
+  it('cuts a music bed at the project end with a 300 ms fade-out', () => {
+    const project = makeProject({
+      assets: [makeAsset('a1'), makeAsset('a3', 'audio')],
+      clips: [makeClip('c1', 'a1', { outMs: 7000 })],
+      audioClips: [makeClip('c2', 'a3', { outMs: 30_000 })],
+    });
+    const plan = planFor(project);
+    expect(plan.durationMs).toBe(7000);
+    expect(argAfter(plan, '-t')).toBe('7.000');
+    // The cut keeps the matching source span and ramps out over the last 300 ms.
+    expect(plan.filterGraph).toContain('atrim=start=0.000:end=7.000');
+    expect(plan.filterGraph).toContain('afade=t=out:st=6.700:d=0.300');
+  });
+
+  it('keeps a longer explicit fade-out when the music is cut', () => {
+    const project = makeProject({
+      assets: [makeAsset('a1'), makeAsset('a3', 'audio')],
+      clips: [makeClip('c1', 'a1', { outMs: 7000 })],
+      audioClips: [makeClip('c2', 'a3', { outMs: 30_000, audioFadeOutMs: 1500 })],
+    });
+    expect(planFor(project).filterGraph).toContain('afade=t=out:st=5.500:d=1.500');
+  });
+
+  it('crossfades clip audio across a transition', () => {
+    const project = makeProject({
+      clips: [
+        makeClip('c1', 'a1', { outMs: 2000, transitionOut: { id: 't1', type: 'fade', durationMs: 500 } }),
+        makeClip('c2', 'a2', { outMs: 2000 }),
+      ],
+    });
+    const plan = planFor(project);
+    // The outgoing clip fades out over the overlap (1.5s..2.0s)…
+    expect(plan.filterGraph).toContain(
+      '[0:a]atrim=start=0.000:end=2.000,asetpts=PTS-STARTPTS,volume=1,afade=t=out:st=1.500:d=0.500',
+    );
+    // …while the incoming clip is delayed to the xfade offset and fades in there.
+    expect(plan.filterGraph).toContain(
+      '[1:a]atrim=start=0.000:end=2.000,asetpts=PTS-STARTPTS,volume=1,adelay=1500|1500,afade=t=in:st=1.500:d=0.500',
+    );
+  });
+
+  it('lets an explicit fade longer than the transition win', () => {
+    const project = makeProject({
+      clips: [
+        makeClip('c1', 'a1', {
+          outMs: 2000,
+          audioFadeOutMs: 900,
+          transitionOut: { id: 't1', type: 'fade', durationMs: 500 },
+        }),
+        makeClip('c2', 'a2', { outMs: 2000, audioFadeInMs: 800 }),
+      ],
+    });
+    const plan = planFor(project);
+    expect(plan.filterGraph).toContain('afade=t=out:st=1.100:d=0.900');
+    expect(plan.filterGraph).toContain('adelay=1500|1500,afade=t=in:st=1.500:d=0.800');
+  });
+
+  it('does not invent audio filters for a silent clip in a transition', () => {
+    const project = makeProject({
+      assets: [makeAsset('a1', 'video', { hasAudio: false }), makeAsset('a2')],
+      clips: [
+        makeClip('c1', 'a1', { outMs: 2000, transitionOut: { id: 't1', type: 'fade', durationMs: 500 } }),
+        makeClip('c2', 'a2', { outMs: 2000 }),
+      ],
+    });
+    const plan = planFor(project);
+    expect(plan.filterGraph).not.toContain('[0:a]');
+    expect(plan.filterGraph).toContain('adelay=1500|1500,afade=t=in:st=1.500:d=0.500');
+    expect(plan.filterGraph).not.toContain('afade=t=out');
   });
 
   it('skips silent video assets on audio tracks instead of referencing [N:a]', () => {
