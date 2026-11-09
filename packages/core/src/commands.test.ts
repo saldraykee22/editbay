@@ -879,6 +879,85 @@ describe('canvas and project name', () => {
   });
 });
 
+describe('set_track', () => {
+  it('mutes and unmutes audio and video tracks with change summaries', () => {
+    const project = createEmptyProject();
+    const audioId = project.tracks.find((track) => track.kind === 'audio')?.id ?? '';
+    const videoId = project.tracks.find((track) => track.kind === 'video')?.id ?? '';
+
+    const mutedAudio = applyOk(project, { op: 'set_track', trackId: audioId, muted: true });
+    expect(mutedAudio.project.tracks.find((track) => track.id === audioId)?.muted).toBe(true);
+    expect(mutedAudio.changes).toEqual(['Muted audio track']);
+
+    const unmutedAudio = applyOk(mutedAudio.project, { op: 'set_track', trackId: audioId, muted: false });
+    expect(unmutedAudio.project.tracks.find((track) => track.id === audioId)?.muted).toBe(false);
+    expect(unmutedAudio.changes).toEqual(['Unmuted audio track']);
+
+    const mutedVideo = applyOk(project, { op: 'set_track', trackId: videoId, muted: true });
+    expect(mutedVideo.project.tracks.find((track) => track.id === videoId)?.muted).toBe(true);
+    expect(mutedVideo.changes).toEqual(['Muted video track']);
+  });
+
+  it('hides and shows video, overlay and text tracks with change summaries', () => {
+    const project = createEmptyProject();
+    for (const kind of ['video', 'overlay', 'text'] as const) {
+      const trackId = project.tracks.find((track) => track.kind === kind)?.id ?? '';
+      const hidden = applyOk(project, { op: 'set_track', trackId, hidden: true });
+      expect(hidden.project.tracks.find((track) => track.id === trackId)?.hidden).toBe(true);
+      expect(hidden.changes).toEqual([`Hid ${kind} track`]);
+
+      const shown = applyOk(hidden.project, { op: 'set_track', trackId, hidden: false });
+      expect(shown.project.tracks.find((track) => track.id === trackId)?.hidden).toBe(false);
+      expect(shown.changes).toEqual([`Showed ${kind} track`]);
+    }
+  });
+
+  it('rejects invalid muted/hidden and track kind combinations', () => {
+    const project = createEmptyProject();
+    const audioId = project.tracks.find((track) => track.kind === 'audio')?.id ?? '';
+    const overlayId = project.tracks.find((track) => track.kind === 'overlay')?.id ?? '';
+    const textId = project.tracks.find((track) => track.kind === 'text')?.id ?? '';
+
+    for (const command of [
+      { op: 'set_track' as const, trackId: audioId, hidden: true },
+      { op: 'set_track' as const, trackId: overlayId, muted: true },
+      { op: 'set_track' as const, trackId: textId, muted: true },
+    ]) {
+      const result = applyCommand(project, command);
+      expect(result.ok, JSON.stringify(command)).toBe(false);
+      if (!result.ok) expect(result.error.code).toBe('invalid');
+    }
+  });
+
+  it('rejects missing fields and non-existent tracks', () => {
+    const project = createEmptyProject();
+    const audioId = project.tracks.find((track) => track.kind === 'audio')?.id ?? '';
+
+    const empty = applyCommand(project, { op: 'set_track', trackId: audioId });
+    expect(empty.ok).toBe(false);
+    if (!empty.ok) expect(empty.error.code).toBe('invalid');
+
+    const missing = applyCommand(project, { op: 'set_track', trackId: 't_missing', muted: true });
+    expect(missing.ok).toBe(false);
+    if (!missing.ok) expect(missing.error.code).toBe('not_found');
+  });
+
+  it('supports undo and redo through EditSession', () => {
+    const session = new EditSession(createEmptyProject());
+    const audioId = session.project.tracks.find((track) => track.kind === 'audio')?.id ?? '';
+
+    const result = session.apply({ op: 'set_track', trackId: audioId, muted: true });
+    expect(result.ok).toBe(true);
+    expect(session.project.tracks.find((track) => track.id === audioId)?.muted).toBe(true);
+
+    expect(session.undo()).toBe(true);
+    expect(Boolean(session.project.tracks.find((track) => track.id === audioId)?.muted)).toBe(false);
+
+    expect(session.redo()).toBe(true);
+    expect(session.project.tracks.find((track) => track.id === audioId)?.muted).toBe(true);
+  });
+});
+
 describe('engine contracts', () => {
   it('returns unsupported for unknown ops without throwing', () => {
     const command = { op: 'teleport' } as unknown as EditCommand;

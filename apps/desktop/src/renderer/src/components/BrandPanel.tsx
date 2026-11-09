@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { createId, type Asset } from '@editbay/core';
 import { Button, Chip, Field, Input, Section, Textarea } from '@editbay/ui';
 import type { EditorStore } from '../state/store';
 import { memory } from '../state/workspace';
@@ -10,6 +11,7 @@ interface BrandDraft {
   name: string;
   colors: string;
   fonts: string;
+  logoPath: string;
   body: string;
 }
 
@@ -20,7 +22,7 @@ interface Note {
 }
 
 export function BrandPanel({ store }: { store: EditorStore }) {
-  const [brand, setBrand] = useState<BrandDraft>({ name: '', colors: '', fonts: '', body: '' });
+  const [brand, setBrand] = useState<BrandDraft>({ name: '', colors: '', fonts: '', logoPath: '', body: '' });
   const [notes, setNotes] = useState<Note[]>([]);
   const [draft, setDraft] = useState('');
   const [saved, setSaved] = useState(false);
@@ -38,6 +40,7 @@ export function BrandPanel({ store }: { store: EditorStore }) {
           name: loaded.name,
           colors: loaded.colors.join(', '),
           fonts: loaded.fonts.join(', '),
+          logoPath: loaded.logoPath ?? '',
           body: loaded.body,
         });
       }
@@ -45,19 +48,72 @@ export function BrandPanel({ store }: { store: EditorStore }) {
     })();
   }, []);
 
-  const save = async () => {
+  const persistBrand = async (next: BrandDraft) => {
+    const trimmedLogo = next.logoPath.trim();
     await memory.saveBrand({
       id: BRAND_ID,
-      name: brand.name.trim() || 'My brand',
-      colors: parseHexList(brand.colors),
-      fonts: parseCommaList(brand.fonts),
-      body: brand.body,
+      name: next.name.trim() || 'My brand',
+      colors: parseHexList(next.colors),
+      fonts: parseCommaList(next.fonts),
+      ...(trimmedLogo ? { logoPath: trimmedLogo } : {}),
+      body: next.body,
       updatedAt: new Date().toISOString(),
     });
     // The agent loads `project.brandId` at the start of every turn.
     store.setBrandId(BRAND_ID);
+  };
+
+  const save = async () => {
+    await persistBrand(brand);
     setSaved(true);
     setTimeout(() => setSaved(false), 1600);
+  };
+
+  const chooseLogo = async () => {
+    const picked = await window.editbay.pickLogo();
+    if (!picked) return;
+    const next = { ...brand, logoPath: picked };
+    setBrand(next);
+    await persistBrand(next);
+  };
+
+  const addLogoToVideo = async () => {
+    const logoPath = brand.logoPath.trim();
+    if (!logoPath) return;
+    const [probe, thumbnail] = await Promise.all([
+      window.editbay.probeMedia(logoPath).catch(() => null),
+      window.editbay.thumbnail(logoPath, 0, 320).catch(() => undefined),
+    ]);
+    const label = logoPath.split(/[\\/]/).pop() || 'logo.png';
+    const asset: Asset = {
+      id: createId('a'),
+      kind: 'image',
+      uri: logoPath,
+      label,
+      durationMs: 5000,
+      width: probe?.width ?? 200,
+      height: probe?.height ?? 200,
+      thumbnailUri: thumbnail,
+      origin: 'imported',
+      createdAt: new Date().toISOString(),
+    };
+    const projectDuration = store.durationMs > 0 ? store.durationMs : 5000;
+    const batch = store.applyBatch([
+      { op: 'add_asset', asset },
+      {
+        op: 'add_overlay',
+        assetId: asset.id,
+        startMs: 0,
+        durationMs: projectDuration,
+        x: 0.88,
+        y: 0.08,
+        scale: 0.16,
+      },
+    ]);
+    const second = batch.results[1];
+    if (second?.ok && second.createdIds.clip) {
+      store.select({ clipId: second.createdIds.clip });
+    }
   };
 
   const remember = async () => {
@@ -84,6 +140,18 @@ export function BrandPanel({ store }: { store: EditorStore }) {
         </Field>
         <Field label="Fonts">
           <Input value={brand.fonts} onChange={(event) => setBrand({ ...brand, fonts: event.target.value })} placeholder="IBM Plex Sans" />
+        </Field>
+        <Field label="Logo" hint={brand.logoPath.trim() ? brand.logoPath.split(/[\\/]/).pop() : 'Optional brand mark for video overlays.'}>
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+            <Button size="sm" variant="ghost" icon="folder" onClick={chooseLogo}>
+              Choose logo
+            </Button>
+            {brand.logoPath.trim() ? (
+              <Button size="sm" variant="ghost" icon="plus" onClick={addLogoToVideo}>
+                Add logo to video
+              </Button>
+            ) : null}
+          </div>
         </Field>
         <Field label="Identity notes" hint="Tone, audience, products, what to avoid. The agent reads this before every edit.">
           <Textarea

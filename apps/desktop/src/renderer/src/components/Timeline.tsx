@@ -1,9 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Clip, TextItem, Track } from '@editbay/core';
-import { clipTimelineDurationMs } from '@editbay/core';
+import { clipStartMsOnTrack, clipTimelineDurationMs, trackDurationMs } from '@editbay/core';
 import { Button, IconButton } from '@editbay/ui';
 import { EditorStore, useEditorVersion, usePlayhead } from '../state/store';
-import { videoClips } from '../lib/compositor';
 import { Inspector } from './Inspector';
 
 interface DragState {
@@ -15,6 +14,7 @@ interface DragState {
 }
 
 const TRACK_H = 56;
+const OVERLAY_EMPTY_H = 32;
 const LANE_H = 44;
 const LANE_GAP = 6;
 const TRACK_PAD = 6;
@@ -101,11 +101,15 @@ export function Timeline({ store }: { store: EditorStore }) {
   }, []);
 
   const duration = store.durationMs;
-  const durationSeconds = Math.max(1, duration / 1000);
+  const maxExtentMs = useMemo(
+    () => Math.max(duration, ...project.tracks.map((track) => trackDurationMs(track))),
+    [duration, project.tracks],
+  );
+  const spanSeconds = Math.max(1, maxExtentMs / 1000);
   const fitZoom = useMemo(() => {
-    if (scrollWidth <= 0 || duration <= 0) return store.pxPerSec;
-    return Math.max(18, Math.min(400, Math.round((scrollWidth * 0.95) / durationSeconds)));
-  }, [scrollWidth, duration, durationSeconds, store.pxPerSec]);
+    if (scrollWidth <= 0 || maxExtentMs <= 0) return store.pxPerSec;
+    return Math.max(18, Math.min(400, Math.round((scrollWidth * 0.94) / spanSeconds)));
+  }, [scrollWidth, maxExtentMs, spanSeconds, store.pxPerSec]);
 
   const pxPerSec = userZoom ?? fitZoom;
 
@@ -132,13 +136,19 @@ export function Timeline({ store }: { store: EditorStore }) {
 
   const contentWidth =
     userZoom === null
-      ? Math.max(scrollWidth, Math.ceil(durationSeconds * pxPerSec))
-      : Math.max(scrollWidth, Math.ceil((durationSeconds + 0.5) * pxPerSec));
-  const contentSeconds = pxPerSec > 0 ? Math.max(durationSeconds, contentWidth / pxPerSec) : durationSeconds;
+      ? Math.max(scrollWidth, Math.ceil(spanSeconds * pxPerSec))
+      : Math.max(scrollWidth, Math.ceil((spanSeconds + 0.5) * pxPerSec));
+  const contentSeconds = pxPerSec > 0 ? Math.max(spanSeconds, contentWidth / pxPerSec) : spanSeconds;
 
   const clipStarts = useMemo(() => {
     const map = new Map<string, number>();
-    for (const entry of videoClips(project)) map.set(entry.clip.id, entry.startMs);
+    const videoTrack = project.tracks.find((t) => t.kind === 'video');
+    if (videoTrack) {
+      for (let index = 0; index < videoTrack.clips.length; index += 1) {
+        const clip = videoTrack.clips[index];
+        if (clip) map.set(clip.id, clipStartMsOnTrack(videoTrack, index));
+      }
+    }
     return map;
   }, [project]);
 
@@ -246,6 +256,12 @@ export function Timeline({ store }: { store: EditorStore }) {
         .find((entry) => entry.clip.id === id);
       if (!location) return;
 
+      if (location.track.kind === 'overlay') {
+        const startMs = Math.max(0, Math.round(original.startMs + deltaMs));
+        store.apply({ op: 'set_overlay', clipId: id, startMs });
+        return;
+      }
+
       if (location.track.kind !== 'video') {
         const startMs = Math.max(0, Math.round(original.startMs + deltaMs));
         store.apply({ op: 'set_audio_start', clipId: id, startMs });
@@ -281,6 +297,26 @@ export function Timeline({ store }: { store: EditorStore }) {
         .find((entry) => entry.clip.id === id);
       if (!location) return;
       const speed = location.clip.speed && location.clip.speed > 0 ? location.clip.speed : 1;
+
+      if (location.track.kind === 'overlay') {
+        const asset = project.assets.find((a) => a.id === location.clip.assetId);
+        const originalDurationMs = Math.max(100, Math.round((original.outMs - original.inMs) / speed));
+        const maxDurationMs =
+          asset && asset.kind !== 'image' && asset.durationMs > 0
+            ? Math.max(100, Math.floor((asset.durationMs - location.clip.inMs) / speed))
+            : 600_000;
+        if (kind === 'trim-right') {
+          const durationMs = Math.min(maxDurationMs, Math.max(100, Math.round(originalDurationMs + deltaMs)));
+          store.apply({ op: 'set_overlay', clipId: id, durationMs });
+        } else {
+          const nextStartMs = Math.max(0, Math.round(original.startMs + deltaMs));
+          const actualDelta = nextStartMs - original.startMs;
+          const durationMs = Math.min(maxDurationMs, Math.max(100, Math.round(originalDurationMs - actualDelta)));
+          store.apply({ op: 'set_overlay', clipId: id, startMs: nextStartMs, durationMs });
+        }
+        return;
+      }
+
       const sourceDeltaMs = Math.round(deltaMs * speed);
       const nextIn = Math.round(original.inMs + (kind === 'trim-left' ? sourceDeltaMs : 0));
       const nextOut = Math.round(original.outMs + (kind === 'trim-right' ? sourceDeltaMs : 0));
@@ -305,9 +341,25 @@ export function Timeline({ store }: { store: EditorStore }) {
     const dragging = drag && drag.id === clip.id;
     const shift = dragging ? drag.deltaMs : 0;
     const selected = store.selection.clipId === clip.id;
-    const left = msToPx(startMs + (dragging ? shift : 0));
-    const width = Math.max(12, msToPx(durationMs));
-    const className = `clip ${selected ? 'selected' : ''} ${track.kind === 'audio' ? 'audio-clip' : ''}`;
+
+    let previewStartMs = startMs;
+    let previewDurationMs = durationMs;
+    if (dragging) {
+      if (drag.kind === 'clip') {
+        previewStartMs = Math.max(0, startMs + shift);
+      } else if (drag.kind === 'trim-right') {
+        previewDurationMs = Math.max(100, durationMs + shift);
+      } else if (drag.kind === 'trim-left') {
+        previewStartMs = Math.max(0, startMs + shift);
+        previewDurationMs = Math.max(100, durationMs - (previewStartMs - startMs));
+      }
+    }
+
+    const left = msToPx(previewStartMs);
+    const width = Math.max(12, msToPx(previewDurationMs));
+    const kindCls =
+      track.kind === 'audio' ? 'audio-clip' : track.kind === 'overlay' ? 'overlay-clip' : '';
+    const className = `clip ${selected ? 'selected' : ''} ${kindCls}`.trim();
 
     const frameCount = Math.max(2, Math.min(12, Math.round(width / 56)));
     const filmstripKey = asset ? `${asset.id}:${clip.inMs}-${clip.outMs}:${frameCount}` : '';
@@ -315,6 +367,11 @@ export function Timeline({ store }: { store: EditorStore }) {
 
     const waveformKey = asset ? `${asset.id}:${clip.inMs}-${clip.outMs}:${WAVEFORM_BUCKETS}` : '';
     const peaks = track.kind === 'audio' && waveformKey ? waveformCache.get(waveformKey) : undefined;
+
+    const clipEndMs = previewStartMs + previewDurationMs;
+    const hasOverflow = duration > 0 && clipEndMs > duration;
+    const overflowStartMs = hasOverflow ? Math.max(previewStartMs, duration) : 0;
+    const overflowMs = hasOverflow ? clipEndMs - overflowStartMs : 0;
 
     return (
       <div
@@ -375,9 +432,20 @@ export function Timeline({ store }: { store: EditorStore }) {
           </svg>
         ) : null}
 
+        {hasOverflow && overflowMs > 0 ? (
+          <div
+            className="clip-overflow"
+            style={{
+              left: msToPx(overflowStartMs - previewStartMs),
+              width: msToPx(overflowMs),
+            }}
+            aria-hidden="true"
+          />
+        ) : null}
+
         <div className="meta">
           <div className="name">{asset?.label ?? `clip ${index + 1}`}</div>
-          <div className="dur">{(durationMs / 1000).toFixed(2)}s</div>
+          <div className="dur">{(previewDurationMs / 1000).toFixed(2)}s</div>
         </div>
         <div
           className="handle left"
@@ -443,12 +511,24 @@ export function Timeline({ store }: { store: EditorStore }) {
     );
   };
 
-  const tracks = project.tracks
-    .filter((t) => t.kind === 'video' || t.kind === 'overlay' || t.kind === 'text' || t.kind === 'audio')
-    .slice(0, 4);
+  const tracks = useMemo(() => {
+    const filtered = project.tracks.filter(
+      (t) => t.kind === 'video' || t.kind === 'overlay' || t.kind === 'text' || t.kind === 'audio',
+    );
+    if (!filtered.some((t) => t.kind === 'overlay')) {
+      const placeholder: Track = { id: 'o_empty', kind: 'overlay', clips: [], items: [] };
+      const videoIdx = filtered.findIndex((t) => t.kind === 'video');
+      filtered.splice(videoIdx >= 0 ? videoIdx + 1 : 0, 0, placeholder);
+    }
+    return filtered.slice(0, 4);
+  }, [project.tracks]);
 
   const trackLayouts = useMemo(() => {
     return tracks.map((track) => {
+      if (track.kind === 'overlay') {
+        const height = track.clips.length === 0 ? OVERLAY_EMPTY_H : TRACK_H;
+        return { track, height, laneById: new Map<string, number>() };
+      }
       if (track.kind !== 'text') {
         return { track, height: TRACK_H, laneById: new Map<string, number>() };
       }
@@ -529,15 +609,58 @@ export function Timeline({ store }: { store: EditorStore }) {
           onClick={() => setUserZoom((z) => Math.min(400, Math.round((z ?? fitZoom) * 1.25)))}
         />
       </div>
+      <Inspector store={store} target={editing} onClose={() => setEditing(null)} />
       <div className="timeline-body">
         <div className="track-labels">
           <div style={{ height: 24, borderBottom: '1px solid var(--line)' }} />
-          {trackLayouts.map(({ track, height }) => (
-            <div key={track.id} className={`track-label ${track.kind}`} style={{ height }}>
-              <span className="dot" />
-              <span>{track.kind}</span>
-            </div>
-          ))}
+          {trackLayouts.map(({ track, height }) => {
+            const isOff = Boolean(track.hidden || track.muted);
+            const isAudio = track.kind === 'audio';
+            const existsInProject = project.tracks.some((t) => t.id === track.id);
+            return (
+              <div
+                key={track.id}
+                className={`track-label ${track.kind} ${isOff ? 'is-off' : ''}`.trim()}
+                style={{ height }}
+              >
+                <span className="dot" />
+                <span className="track-label-name">{track.kind}</span>
+                {existsInProject ? (
+                  isAudio ? (
+                    <IconButton
+                      className="track-toggle"
+                      size={13}
+                      icon={track.muted ? 'volumeOff' : 'volume'}
+                      active={!track.muted}
+                      title={track.muted ? 'Unmute audio track' : 'Mute audio track'}
+                      onClick={() =>
+                        store.apply({
+                          op: 'set_track',
+                          trackId: track.id,
+                          muted: !track.muted,
+                        })
+                      }
+                    />
+                  ) : (
+                    <IconButton
+                      className="track-toggle"
+                      size={13}
+                      icon={track.hidden ? 'eyeOff' : 'eye'}
+                      active={!track.hidden}
+                      title={track.hidden ? `Show ${track.kind} track` : `Hide ${track.kind} track`}
+                      onClick={() =>
+                        store.apply({
+                          op: 'set_track',
+                          trackId: track.id,
+                          hidden: !track.hidden,
+                        })
+                      }
+                    />
+                  )
+                ) : null}
+              </div>
+            );
+          })}
         </div>
         <div className="timeline-scroll" ref={scrollRef}>
           <div style={{ width: contentWidth, minWidth: '100%', position: 'relative' }}>
@@ -557,18 +680,37 @@ export function Timeline({ store }: { store: EditorStore }) {
                 </div>
               ))}
             </div>
-            {trackLayouts.map(({ track, height, laneById }) => (
-              <div key={track.id} className="track-row" style={{ height }}>
-                {track.kind === 'text'
-                  ? track.items.map((item) => renderText(item, laneById.get(item.id) ?? 0))
-                  : track.clips.map((clip, index) => renderClip(track, clip, index))}
+            {trackLayouts.map(({ track, height, laneById }) => {
+              const isOff = Boolean(track.hidden || track.muted);
+              return (
+                <div
+                  key={track.id}
+                  className={`track-row ${track.kind}-row ${isOff ? 'is-off' : ''}`.trim()}
+                  style={{ height }}
+                >
+                  {track.kind === 'text' ? (
+                    track.items.map((item) => renderText(item, laneById.get(item.id) ?? 0))
+                  ) : track.kind === 'overlay' && track.clips.length === 0 ? (
+                    <div className="track-empty-hint">Drop a logo or image</div>
+                  ) : (
+                    track.clips.map((clip, index) => renderClip(track, clip, index))
+                  )}
+                </div>
+              );
+            })}
+            {duration > 0 ? (
+              <div
+                className="project-end-line"
+                style={{ left: msToPx(duration) }}
+                title={`Project end (${(duration / 1000).toFixed(2)}s)`}
+              >
+                <span className="project-end-tag">END</span>
               </div>
-            ))}
+            ) : null}
             <div className="playhead" style={{ left: msToPx(playheadMs) }} />
           </div>
         </div>
       </div>
-      <Inspector store={store} target={editing} onClose={() => setEditing(null)} />
     </div>
   );
 }

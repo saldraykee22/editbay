@@ -95,6 +95,18 @@ export function describeChanges(before: Project, after: Project): string[] {
     );
   }
 
+  const beforeTracks = new Map(before.tracks.map((track) => [track.id, track]));
+  for (const track of after.tracks) {
+    const previous = beforeTracks.get(track.id);
+    if (!previous) continue;
+    if (Boolean(previous.muted) !== Boolean(track.muted)) {
+      changes.push(`${track.muted ? 'Muted' : 'Unmuted'} ${track.kind} track`);
+    }
+    if (Boolean(previous.hidden) !== Boolean(track.hidden)) {
+      changes.push(`${track.hidden ? 'Hid' : 'Showed'} ${track.kind} track`);
+    }
+  }
+
   const beforeAssets = new Map(before.assets.map((asset) => [asset.id, asset]));
   const afterAssets = new Map(after.assets.map((asset) => [asset.id, asset]));
   for (const asset of after.assets) {

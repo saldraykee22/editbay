@@ -1433,6 +1433,35 @@ function normalizeTrack(track: Track): void {
       return okOutcome();
     }
 
+    case 'set_track': {
+      const track = trackById(draft, command.trackId);
+      if (!track) {
+        return failOutcome('not_found', `Track '${command.trackId}' not found`);
+      }
+      if (command.muted === undefined && command.hidden === undefined) {
+        return failOutcome('invalid', 'set_track needs at least one of muted or hidden');
+      }
+      if (command.muted !== undefined) {
+        if (typeof command.muted !== 'boolean') {
+          return failOutcome('invalid', 'muted must be a boolean');
+        }
+        if (track.kind !== 'audio' && track.kind !== 'video') {
+          return failOutcome('invalid', `Cannot set muted on a ${track.kind} track`);
+        }
+      }
+      if (command.hidden !== undefined) {
+        if (typeof command.hidden !== 'boolean') {
+          return failOutcome('invalid', 'hidden must be a boolean');
+        }
+        if (track.kind !== 'video' && track.kind !== 'overlay' && track.kind !== 'text') {
+          return failOutcome('invalid', `Cannot set hidden on a ${track.kind} track`);
+        }
+      }
+      if (command.muted !== undefined) track.muted = command.muted;
+      if (command.hidden !== undefined) track.hidden = command.hidden;
+      return okOutcome();
+    }
+
     default: {
       const op = (command as { op?: unknown }).op;
       return failOutcome(

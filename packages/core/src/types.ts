@@ -356,6 +356,13 @@ export interface SetProjectNameCommand extends BaseCommand {
   name: string;
 }
 
+export interface SetTrackCommand extends BaseCommand {
+  op: 'set_track';
+  trackId: Id;
+  muted?: boolean;
+  hidden?: boolean;
+}
+
 /** Trim + start in one step, used by the timeline drag interactions. */
 export interface RetimeClipCommand extends BaseCommand {
   op: 'retime_clip';
@@ -390,6 +397,7 @@ export type EditCommand =
   | RemoveTransitionCommand
   | SetCanvasCommand
   | SetProjectNameCommand
+  | SetTrackCommand
   | RetimeClipCommand;
 
 export type CommandOp = EditCommand['op'];
