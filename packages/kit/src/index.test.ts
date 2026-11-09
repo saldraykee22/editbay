@@ -194,6 +194,40 @@ describe('HeadlessStudio', () => {
     // Nothing was written for the rejected ids.
     expect(existsSync(join(dir, 'workspace', 'brands'))).toBe(false);
   });
+
+  it('imports captions in a single batch and rolls them back with a single undo', async () => {
+    const dir = join(workDir, 'captions');
+    mkdirSync(dir, { recursive: true });
+    const instance = await studio(dir);
+
+    const srtContent = `1
+00:00:01,000 --> 00:00:03,000
+Caption One
+
+2
+00:00:03,500 --> 00:00:05,500
+Caption Two
+`;
+    const srtPath = join(dir, 'subtitles.srt');
+    writeFileSync(srtPath, srtContent, 'utf8');
+
+    const result = await instance.importCaptions(srtPath, { offsetMs: 500 });
+    expect(result.added).toBe(2);
+    expect(result.warnings).toHaveLength(0);
+
+    const textTrack = instance.project.tracks.find((track) => track.kind === 'text');
+    expect(textTrack?.items).toHaveLength(2);
+    expect(textTrack?.items[0]?.startMs).toBe(1500);
+    expect(textTrack?.items[0]?.text).toBe('Caption One');
+    expect(textTrack?.items[1]?.startMs).toBe(4000);
+    expect(textTrack?.items[1]?.text).toBe('Caption Two');
+
+    // A single undo rolls back both captions
+    const undoOk = await instance.undo();
+    expect(undoOk).toBe(true);
+    const textTrackAfterUndo = instance.project.tracks.find((track) => track.kind === 'text');
+    expect(textTrackAfterUndo?.items).toHaveLength(0);
+  });
 });
 
 describe('resolveBuiltinSkillsDir', () => {

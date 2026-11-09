@@ -130,4 +130,34 @@ export function registerMediaTools(server: McpServer, studio: HeadlessStudio): v
       }
     },
   );
+
+  server.registerTool(
+    'import_captions',
+    {
+      title: 'Import captions',
+      description:
+        'Import subtitles from an SRT or WebVTT file into the project text track as a single undoable batch. ' +
+        'Optionally shifts all timestamps by offsetMs. Returns { added, warnings }.',
+      inputSchema: {
+        path: z.string().min(1).describe('Absolute or cwd-relative path to the .srt or .vtt file.'),
+        offsetMs: z
+          .number()
+          .int()
+          .optional()
+          .describe('Optional millisecond shift to apply to all caption timestamps.'),
+      },
+    },
+    async (args) => {
+      try {
+        const result = await studio.importCaptions(args.path, {
+          ...(args.offsetMs !== undefined ? { offsetMs: args.offsetMs } : {}),
+        });
+        return jsonResult(result);
+      } catch (error) {
+        return errorResult(
+          `${errorMessage(error)} Caption import failed. Check that the file exists and is valid SRT/WebVTT.`,
+        );
+      }
+    },
+  );
 }
