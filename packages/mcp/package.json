@@ -22,5 +22,19 @@
   },
   "devDependencies": {
     "esbuild": "^0.24.0"
-  }
+  },
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/saldraykee22/editbay.git",
+    "directory": "packages/mcp"
+  },
+  "homepage": "https://github.com/saldraykee22/editbay",
+  "engines": {
+    "node": ">=20.19"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ]
 }
