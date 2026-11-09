@@ -237,6 +237,44 @@ export interface SetClipTransformCommand extends BaseCommand {
   transform: Partial<Transform>;
 }
 
+/**
+ * Places an image or video above the main video (logo, product shot, PiP).
+ *
+ * `x`/`y` are normalized canvas coordinates with the overlay centred on the
+ * point (0,0 = top-left, 0.5,0.5 = canvas centre). They are stored as
+ * `Transform.x`/`y` offsets from the canvas centre, so the renderer and the
+ * preview share one geometry.
+ */
+export interface AddOverlayCommand extends BaseCommand {
+  op: 'add_overlay';
+  assetId: Id;
+  /** Timeline start; overlays are placed absolutely. */
+  startMs: number;
+  /** Rendered length on the timeline (ms). Images have no source limit. */
+  durationMs: number;
+  /** Normalized centre anchor, 0..1. */
+  x: number;
+  y: number;
+  /** Overlay width as a fraction of the canvas width, 0.05..1. */
+  scale: number;
+  /** 0..1, defaults to 1. */
+  opacity?: number;
+}
+
+/** Partial update of an overlay clip; omitted fields keep their value. */
+export interface SetOverlayCommand extends BaseCommand {
+  op: 'set_overlay';
+  clipId: Id;
+  startMs?: number;
+  durationMs?: number;
+  /** Normalized centre anchor, 0..1. */
+  x?: number;
+  y?: number;
+  /** Overlay width as a fraction of the canvas width, 0.05..1. */
+  scale?: number;
+  opacity?: number;
+}
+
 export interface AddTextCommand extends BaseCommand {
   op: 'add_text';
   trackId?: Id;
@@ -340,6 +378,8 @@ export type EditCommand =
   | SetAudioStartCommand
   | SetClipSpeedCommand
   | SetClipTransformCommand
+  | AddOverlayCommand
+  | SetOverlayCommand
   | AddTextCommand
   | EditTextCommand
   | DeleteTextCommand

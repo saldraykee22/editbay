@@ -113,7 +113,7 @@ export function describeChanges(before: Project, after: Project): string[] {
     const label = assetLabel(after, ref.clip.assetId);
     if (!previous) {
       const start = clipStartMsOnTrack(ref.track, ref.index);
-      const noun = ref.track.kind === 'audio' ? 'audio' : 'clip';
+      const noun = ref.track.kind === 'audio' ? 'audio' : ref.track.kind === 'overlay' ? 'overlay' : 'clip';
       changes.push(`Added ${noun} '${label}' at ${seconds(start)}`);
       continue;
     }
@@ -166,7 +166,7 @@ export function describeChanges(before: Project, after: Project): string[] {
   for (const ref of beforeClips.values()) {
     if (afterClipIds.has(ref.clip.id)) continue;
     const label = assetLabel(before, ref.clip.assetId);
-    const noun = ref.track.kind === 'audio' ? 'audio' : 'clip';
+    const noun = ref.track.kind === 'audio' ? 'audio' : ref.track.kind === 'overlay' ? 'overlay' : 'clip';
     changes.push(`Removed ${noun} '${label}'`);
   }
 

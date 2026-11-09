@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { DEFAULT_TEXT_STYLE } from '@editbay/core';
+import { applyCommand, createEmptyProject } from '@editbay/core';
 import type { Asset, Clip, Project, Track } from '@editbay/core';
 import { availableVideoEncoders, selectVideoEncoder, videoEncoderArgs } from './encoder';
 import { exportProject } from './export';
@@ -38,6 +39,8 @@ interface Fixtures {
   dir: string;
   red: { path: string; probe: ProbeResult };
   blue: { path: string; probe: ProbeResult };
+  blueLong: { path: string; probe: ProbeResult };
+  logo: { path: string; probe: ProbeResult };
   music: { path: string; probe: ProbeResult };
   image: { path: string; probe: ProbeResult };
   tall: { path: string; probe: ProbeResult };
@@ -161,6 +164,16 @@ function assetPathsOf(project: Project): Record<string, string> {
 
 /** Center pixel of a frame as RGB, decoded through ffmpeg rawvideo. */
 async function centerPixel(filePath: string, atMs: number): Promise<[number, number, number]> {
+  return pixelAt(filePath, atMs, CANVAS.width / 2, CANVAS.height / 2);
+}
+
+/** RGB of one canvas pixel in a frame, decoded through ffmpeg rawvideo. */
+async function pixelAt(
+  filePath: string,
+  atMs: number,
+  pixelX: number,
+  pixelY: number,
+): Promise<[number, number, number]> {
   const result = await runCommandBuffer(resolveFfmpeg(), [
     '-hide_banner',
     '-loglevel',
@@ -179,8 +192,8 @@ async function centerPixel(filePath: string, atMs: number): Promise<[number, num
   ]);
   expect(result.code).toBe(0);
   expect(result.stdout.length).toBe(CANVAS.width * CANVAS.height * 3);
-  const x = Math.floor(CANVAS.width / 2);
-  const y = Math.floor(CANVAS.height / 2);
+  const x = Math.min(CANVAS.width - 1, Math.max(0, Math.round(pixelX)));
+  const y = Math.min(CANVAS.height - 1, Math.max(0, Math.round(pixelY)));
   const offset = (y * CANVAS.width + x) * 3;
   return [result.stdout[offset] ?? -1, result.stdout[offset + 1] ?? -1, result.stdout[offset + 2] ?? -1];
 }
@@ -190,6 +203,8 @@ suite('engine e2e (real ffmpeg)', () => {
     const dir = await mkdtemp(path.join(tmpdir(), 'editbay-engine-e2e-'));
     const redPath = path.join(dir, 'red.mp4');
     const bluePath = path.join(dir, 'blue.mp4');
+    const blueLongPath = path.join(dir, 'blue-long.mp4');
+    const logoPath = path.join(dir, 'logo.png');
     const musicPath = path.join(dir, 'music.m4a');
     const imagePath = path.join(dir, 'still.png');
     const tallPath = path.join(dir, 'tall.mp4');
@@ -251,6 +266,33 @@ suite('engine e2e (real ffmpeg)', () => {
       '-f',
       'lavfi',
       '-i',
+      'color=c=blue:s=320x240:r=30:d=3',
+      ...fixtureEncodeArgs(320, 240),
+      '-pix_fmt',
+      'yuv420p',
+      blueLongPath,
+    ]);
+    await runFfmpeg([
+      '-y',
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-f',
+      'lavfi',
+      '-i',
+      'color=c=red:s=200x200',
+      '-frames:v',
+      '1',
+      logoPath,
+    ]);
+    await runFfmpeg([
+      '-y',
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-f',
+      'lavfi',
+      '-i',
       'sine=frequency=220:sample_rate=48000:duration=1.5',
       '-c:a',
       'aac',
@@ -285,13 +327,16 @@ suite('engine e2e (real ffmpeg)', () => {
       tallPath,
     ]);
 
-    const [redProbe, blueProbe, musicProbe, imageProbe, tallProbe] = await Promise.all([
-      probeMedia(redPath),
-      probeMedia(bluePath),
-      probeMedia(musicPath),
-      probeMedia(imagePath),
-      probeMedia(tallPath),
-    ]);
+    const [redProbe, blueProbe, blueLongProbe, logoProbe, musicProbe, imageProbe, tallProbe] =
+      await Promise.all([
+        probeMedia(redPath),
+        probeMedia(bluePath),
+        probeMedia(blueLongPath),
+        probeMedia(logoPath),
+        probeMedia(musicPath),
+        probeMedia(imagePath),
+        probeMedia(tallPath),
+      ]);
 
     // 3 s + 3 s picture with a 0.5 s crossfade and a 10 s music bed: the export
     // must stop at the picture (5.5 s) instead of trailing the music.
@@ -365,6 +410,8 @@ suite('engine e2e (real ffmpeg)', () => {
       dir,
       red: { path: redPath, probe: redProbe },
       blue: { path: bluePath, probe: blueProbe },
+      blueLong: { path: blueLongPath, probe: blueLongProbe },
+      logo: { path: logoPath, probe: logoProbe },
       music: { path: musicPath, probe: musicProbe },
       image: { path: imagePath, probe: imageProbe },
       tall: { path: tallPath, probe: tallProbe },
@@ -602,6 +649,71 @@ suite('engine e2e (real ffmpeg)', () => {
     expect(probe.width).toBe(1080);
     expect(probe.height).toBe(1920);
     expect(Math.abs(probe.durationMs - 600)).toBeLessThanOrEqual(300);
+  });
+
+  it('composites a logo overlay only inside its timeline window', async () => {
+    const f = fixture();
+    const project = { current: createEmptyProject('Overlay') };
+    const run = (command: Parameters<typeof applyCommand>[1]) => {
+      const result = applyCommand(project.current, command);
+      if (!result.ok) throw new Error(`${command.op} failed: ${result.error.message}`);
+      project.current = result.project;
+    };
+
+    run({ op: 'set_canvas', width: CANVAS.width, height: CANVAS.height, fps: CANVAS.fps });
+    run({
+      op: 'add_asset',
+      asset: videoAsset('bg', f.blueLong.path, f.blueLong.probe, 'Background'),
+    });
+    run({
+      op: 'add_asset',
+      asset: {
+        id: 'logo',
+        kind: 'image',
+        uri: f.logo.path,
+        label: 'Logo',
+        durationMs: 1000,
+        width: f.logo.probe.width,
+        height: f.logo.probe.height,
+        hasAudio: false,
+      },
+    });
+    run({ op: 'import_clip', assetId: 'bg' });
+    run({
+      op: 'add_overlay',
+      assetId: 'logo',
+      startMs: 1000,
+      durationMs: 1000,
+      x: 0.85,
+      y: 0.1,
+      scale: 0.2,
+    });
+
+    const outPath = path.join(f.dir, 'overlay.mp4');
+    const result = await exportProject(project.current, {
+      outPath,
+      assetPaths: assetPathsOf(project.current),
+      quality: 'draft',
+    });
+    expect(result.sizeBytes).toBeGreaterThan(1000);
+    expect(result.durationMs).toBeGreaterThanOrEqual(3000);
+
+    // Logo centre: 0.85 * 320 = 272px, 0.1 * 240 = 24px; the overlay is 64px wide.
+    const [r, g, b] = await pixelAt(outPath, 1500, 272, 24);
+    expect(r).toBeGreaterThan(180);
+    expect(g).toBeLessThan(90);
+    expect(b).toBeLessThan(90);
+
+    // Before the window the same spot shows the blue background.
+    const [r0, g0, b0] = await pixelAt(outPath, 500, 272, 24);
+    expect(r0).toBeLessThan(90);
+    expect(b0).toBeGreaterThan(180);
+
+    // And it disappears again once the overlay window ends.
+    const [r2, g2, b2] = await pixelAt(outPath, 2500, 272, 24);
+    expect(r2).toBeLessThan(90);
+    expect(b2).toBeGreaterThan(180);
+    expect(g2).toBeLessThan(90);
   });
 
   it('extracts data-url frames and writes thumbnails', async () => {

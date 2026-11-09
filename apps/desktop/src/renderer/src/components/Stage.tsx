@@ -6,6 +6,7 @@ import { EditorStore, mediaUrl, useEditorVersion, usePlayhead } from '../state/s
 import {
   activeAudioClipsAt,
   activeClipsAt,
+  activeOverlayClipsAt,
   drawFrame,
   sourceTimeMs,
   type ActiveClip,
@@ -149,6 +150,9 @@ export function Stage({
       const timeMs = store.playheadMs;
       const activeByAsset = new Map<string, ActiveClip>();
       for (const entry of activeClipsAt(project, timeMs)) activeByAsset.set(entry.asset.id, entry);
+      // Overlay video clips (picture-in-picture) must play too; the compositor
+      // draws them between the base picture and the text layer.
+      for (const entry of activeOverlayClipsAt(project, timeMs)) activeByAsset.set(entry.asset.id, entry);
       for (const entry of activeAudioClipsAt(project, timeMs)) {
         if (!activeByAsset.has(entry.asset.id)) activeByAsset.set(entry.asset.id, entry);
       }

@@ -32,9 +32,10 @@ Rules that keep this honest:
 1. One input per clip (images get `-loop 1`), so trims are plain `trim` filters.
 2. Per clip: trim → speed → fps → scale/crop to canvas → effect filters → transform.
 3. Adjacent clips with `transitionOut` are chained with `xfade`.
-4. Text items become `drawtext` with a temp text file (no escaping bugs) and `enable='between(t,…)'`.
-5. Audio: clip audio + music tracks → `amix` with `normalize=0`. Audio-track clips are cut at the project end (with a 300 ms fade-out when they are shortened) and clip audio crossfades over every `transitionOut` window, delayed to the same xfade offset as the picture.
-6. Encode: H.264 yuv420p, AAC 48 kHz, `+faststart`.
+4. Overlay-track clips (logos, PiP) are scaled to a fraction of the canvas width and composited with `overlay` above the picture, each inside its `startMs` window.
+5. Text items become `drawtext` with a temp text file (no escaping bugs) and `enable='between(t,…)'`, drawn above the overlay layers.
+6. Audio: clip audio + music tracks → `amix` with `normalize=0`. Audio-track clips are cut at the project end (with a 300 ms fade-out when they are shortened) and clip audio crossfades over every `transitionOut` window, delayed to the same xfade offset as the picture.
+7. Encode: H.264 yuv420p, AAC 48 kHz, `+faststart`.
 
 Preview is a Canvas 2D compositor that resolves the same effect definitions (`style()`) instead of FFmpeg filters. Preview is an approximation; **export is the reference** — the UI says so.
 

@@ -483,10 +483,6 @@ export function buildRenderPlan(project: Project, options: RenderPlanOptions): E
   const height = evenDimension(project.canvas.height, 1920);
   const fps = Number.isFinite(project.canvas.fps) && project.canvas.fps > 0 ? project.canvas.fps : 30;
 
-  const warningsForOverlay = overlayTracks(project).some((track) => track.clips.length > 0);
-  if (warningsForOverlay) {
-    warnings.push('Overlay tracks are not composited by the FFmpeg engine yet; their clips were ignored.');
-  }
   const videoTracks = project.tracks.filter((track) => track.kind === 'video' && !track.hidden);
   if (videoTracks.length > 1) {
     warnings.push('Only the first video track is rendered; additional video tracks were ignored.');
@@ -643,11 +639,75 @@ export function buildRenderPlan(project: Project, options: RenderPlanOptions): E
     accumulated = outLabel;
   }
 
-  // Text overlays ride on top of the assembled picture.
+  // Overlay tracks (logos, product shots, picture-in-picture) are composited
+  // above the assembled picture and below the text layer, in track order.
+  let videoTail = accumulated;
+  let overlayIndex = 0;
+
+  for (const track of overlayTracks(project)) {
+    for (const clip of track.clips) {
+      const asset = assetFor(clip);
+      const durationMs = clipDurationMs(clip);
+      if (durationMs <= 0) continue;
+      if (asset.kind === 'audio') {
+        warnings.push(`Overlay clip ${clip.id} uses audio asset "${asset.label}" and was skipped.`);
+        continue;
+      }
+
+      const startMs = Math.max(0, clip.startMs ?? 0);
+      const assetPath = pathFor(asset);
+      const transform = clip.transform;
+      const dx = Math.round((transform?.x ?? 0) * width);
+      const dy = Math.round((transform?.y ?? 0) * height);
+      const scale = Math.min(1, Math.max(0.05, transform?.scale ?? 1));
+      const opacity = Math.min(1, Math.max(0, transform?.opacity ?? 1));
+      // Overlay scale is a fraction of the canvas width; height follows the
+      // source aspect ratio and is rounded to an even number of pixels.
+      const overlayWidth = Math.max(2, Math.round((width * scale) / 2) * 2);
+
+      const inputIndex =
+        asset.kind === 'image'
+          ? addInput(assetPath, true, startMs + durationMs)
+          : addInput(assetPath, false, durationMs, { inMs: clip.inMs, outMs: clip.outMs });
+
+      const filters: string[] = [];
+      if (asset.kind === 'image') {
+        // The still is looped from t=0 and hidden outside its window by
+        // `enable`; shifting its PTS would make framesync wait for frame one.
+        filters.push('format=rgba');
+      } else {
+        // Video overlays are pre-seeked by the demuxer, so they only need a
+        // rebase onto their timeline position.
+        filters.push(`trim=start=0:end=${sec(clip.outMs - clip.inMs)}`);
+        filters.push(`setpts=PTS-STARTPTS+${sec(startMs)}/TB`);
+        filters.push('format=rgba');
+        if (asset.hasAudio) {
+          warnings.push(
+            `Audio of overlay clip ${clip.id} was not mixed; overlays are video-only for now.`,
+          );
+        }
+      }
+      filters.push(`scale=w=${overlayWidth}:h=-2`);
+      filters.push('setsar=1');
+      if (opacity < 1) filters.push(`colorchannelmixer=aa=${num(opacity)}`);
+
+      const overlayLabel = `ov${overlayIndex}`;
+      const outLabel = `vov${overlayIndex}`;
+      lines.push(`[${inputIndex}:v]${filters.join(',')}[${overlayLabel}]`);
+      lines.push(
+        `[${videoTail}][${overlayLabel}]overlay=x=(main_w-overlay_w)/2+${dx}:y=(main_h-overlay_h)/2+${dy}:enable='between(t,${sec(
+          startMs,
+        )},${sec(startMs + durationMs)})':eof_action=pass[${outLabel}]`,
+      );
+      videoTail = outLabel;
+      overlayIndex += 1;
+    }
+  }
+
+  // Text overlays ride on top of the assembled picture and the overlay layers.
   const textFileDir = options.textFileDir ?? tmpdir();
   const fontPath = resolveFontPath(options.fontPath);
   const textFiles: TextFile[] = [];
-  let videoTail = accumulated;
   let textIndex = 0;
   for (const item of textItems(project)) {
     const safeId = project.id.replace(/[^A-Za-z0-9_-]/g, '_');

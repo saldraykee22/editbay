@@ -252,6 +252,8 @@ function commandReferenceSection(): string {
     '- `set_audio_start`: clipId, startMs',
     '- `set_clip_speed`: clipId, speed (0.25..4)',
     '- `set_clip_transform`: clipId, transform {x, y, scale, rotation, opacity}',
+    '- `add_overlay`: assetId, startMs, durationMs, x, y (0..1 canvas coordinates, overlay centred on the point), scale (0.05..1 of canvas width), opacity? (0..1, default 1). Images and videos only; a video overlay cannot run past its source length.',
+    '- `set_overlay`: clipId, and any of startMs, durationMs, x, y, scale, opacity',
     '- `add_text`: text, startMs, durationMs, style?, animation? (none|fade|rise|typewriter)',
     '- `edit_text`: itemId, text?, startMs?, durationMs?, style?, animation?',
     '- `delete_text`: itemId',
@@ -263,7 +265,7 @@ function commandReferenceSection(): string {
     '- `set_canvas`: width, height, fps?',
     '- `set_project_name`: name',
     '',
-    'Main video-track clips are sequential (order defines time), and a transition overlaps the next clip by its duration. Audio clips use absolute `startMs`. Text items use `startMs`/`durationMs`.',
+    'Main video-track clips are sequential (order defines time), and a transition overlaps the next clip by its duration. Overlay clips (`add_overlay`) use absolute `startMs` and draw above the main picture but below text. Audio clips use absolute `startMs`. Text items use `startMs`/`durationMs`.',
     '',
     'Example: `[{"op":"trim_clip","clipId":"c_abc","inMs":0,"outMs":2000},{"op":"add_text","text":"Merhaba","startMs":0,"durationMs":2000}]`',
   ].join('\n');
