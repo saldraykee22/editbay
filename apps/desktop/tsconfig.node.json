@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["node"],
+    "lib": ["ES2023"],
+    "baseUrl": ".",
+    "paths": {
+      "@editbay/core": ["../../packages/core/src"],
+      "@editbay/effects": ["../../packages/effects/src"],
+      "@editbay/harness": ["../../packages/harness/src"],
+      "@editbay/engine": ["../../packages/engine/src"]
+    }
+  },
+  "include": ["src/main/**/*.ts", "src/shared/**/*.ts", "electron.vite.config.ts"]
+}

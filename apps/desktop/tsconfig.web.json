@@ -1,0 +1,24 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "jsx": "react-jsx",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "types": ["node"],
+    "baseUrl": ".",
+    "paths": {
+      "@renderer/*": ["src/renderer/src/*"],
+      "@editbay/core": ["../../packages/core/src"],
+      "@editbay/effects": ["../../packages/effects/src"],
+      "@editbay/harness": ["../../packages/harness/src"],
+      "@editbay/harness/agent": ["../../packages/harness/src/agent.ts"],
+      "@editbay/harness/tools": ["../../packages/harness/src/tools.ts"],
+      "@editbay/harness/prompt": ["../../packages/harness/src/prompt.ts"],
+      "@editbay/harness/types": ["../../packages/harness/src/types.ts"],
+      "@editbay/harness/receipts": ["../../packages/harness/src/receipts.ts"],
+      "@editbay/harness/providers": ["../../packages/harness/src/providers/index.ts"],
+      "@editbay/engine": ["../../packages/engine/src"],
+      "@editbay/ui": ["../../packages/ui/src"]
+    }
+  },
+  "include": ["src/renderer/**/*.ts", "src/renderer/**/*.tsx", "src/preload/**/*.ts", "src/shared/**/*.ts"]
+}

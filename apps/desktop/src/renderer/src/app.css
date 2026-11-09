@@ -1,0 +1,106 @@
+/* App-level layout tweaks on top of the design system. */
+
+.app {
+  min-height: 0;
+}
+
+.workspace {
+  min-height: 0;
+}
+
+.stage-col {
+  min-height: 0;
+}
+
+.stage {
+  min-height: 0;
+}
+
+.side .section {
+  padding: 12px 14px;
+}
+
+.side .hint {
+  line-height: 1.5;
+}
+
+input[type='checkbox'] {
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+  background: var(--panel);
+  display: inline-grid;
+  place-items: center;
+  margin: 0;
+}
+
+input[type='checkbox']:checked {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+
+input[type='checkbox']:checked::after {
+  content: '';
+  width: 7px;
+  height: 4px;
+  border-left: 1.5px solid var(--accent-ink);
+  border-bottom: 1.5px solid var(--accent-ink);
+  transform: translateY(-1px) rotate(-45deg);
+}
+
+.chat-log .btn.ghost {
+  border: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.chat-log .btn.ghost:hover {
+  border-color: var(--accent-line);
+  color: var(--text);
+}
+
+.stage-frame {
+  transition: max-width 200ms ease;
+}
+
+.timeline-scroll {
+  scrollbar-width: thin;
+}
+
+.pre {
+  white-space: pre-wrap;
+  font-size: 12px;
+  color: var(--text-dim);
+  user-select: text;
+}
+
+.menu {
+  position: absolute;
+  top: 26px;
+  left: 0;
+  z-index: 40;
+  min-width: 180px;
+  background: var(--panel-2);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  padding: 4px;
+  display: grid;
+  gap: 1px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5);
+}
+
+.menu button {
+  background: transparent;
+  border: 0;
+  text-align: left;
+  padding: 7px 9px;
+  border-radius: 4px;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.menu button:hover {
+  background: var(--panel-3);
+  color: var(--text);
+}

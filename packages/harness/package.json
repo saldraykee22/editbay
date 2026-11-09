@@ -1,0 +1,21 @@
+{
+  "name": "@editbay/harness",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./agent": "./src/agent.ts",
+    "./tools": "./src/tools.ts",
+    "./prompt": "./src/prompt.ts",
+    "./types": "./src/types.ts",
+    "./receipts": "./src/receipts.ts",
+    "./providers": "./src/providers/index.ts"
+  },
+  "dependencies": {
+    "@editbay/core": "workspace:*",
+    "@editbay/effects": "workspace:*"
+  }
+}

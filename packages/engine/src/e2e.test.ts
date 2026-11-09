@@ -1,0 +1,440 @@
+import { existsSync } from 'node:fs';
+import { mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { DEFAULT_TEXT_STYLE } from '@editbay/core';
+import type { Asset, Clip, Project, Track } from '@editbay/core';
+import { exportProject } from './export';
+import { isFfmpegAvailable, resolveFfmpeg, runCommand, runCommandBuffer } from './ffmpeg';
+import { buildRenderPlan } from './plan';
+import { probeMedia } from './probe';
+import { extractFrameDataUrl, makeThumbnail } from './thumbs';
+import type { ExportProgress, ProbeResult } from './types';
+
+/**
+ * Real-ffmpeg end-to-end suite. Synthetic lavfi clips keep it fast (<10s) while
+ * covering trim, text, xfade, audio mixing, thumbnails and encoding.
+ */
+const ffmpegAvailable = isFfmpegAvailable();
+const suite = ffmpegAvailable ? describe : describe.skip;
+
+const CANVAS = { width: 320, height: 240, fps: 30 } as const;
+
+interface Fixtures {
+  dir: string;
+  red: { path: string; probe: ProbeResult };
+  blue: { path: string; probe: ProbeResult };
+  music: { path: string; probe: ProbeResult };
+  image: { path: string; probe: ProbeResult };
+}
+
+let fixtures: Fixtures | undefined;
+
+function fixture(): Fixtures {
+  if (!fixtures) throw new Error('e2e fixtures were not created');
+  return fixtures;
+}
+
+async function runFfmpeg(args: string[]): Promise<void> {
+  const result = await runCommand(resolveFfmpeg(), args, { timeoutMs: 60_000 });
+  if (result.code !== 0) throw new Error(`ffmpeg fixture generation failed: ${result.stderr.slice(-2000)}`);
+}
+
+function videoAsset(id: string, filePath: string, probe: ProbeResult, label: string): Asset {
+  return {
+    id,
+    kind: 'video',
+    uri: filePath,
+    label,
+    durationMs: probe.durationMs,
+    width: probe.width,
+    height: probe.height,
+    fps: probe.fps,
+    hasAudio: probe.hasAudio,
+  };
+}
+
+function makeClip(id: string, assetId: string, overrides: Partial<Clip> = {}): Clip {
+  return { id, assetId, inMs: 0, outMs: 1000, effects: [], ...overrides };
+}
+
+/** Two video clips (trimmed, crossfaded), a text overlay and a music bed. */
+function buildShowreel(): Project {
+  const f = fixture();
+  const assets: Asset[] = [
+    videoAsset('red', f.red.path, f.red.probe, 'Red clip'),
+    videoAsset('blue', f.blue.path, f.blue.probe, 'Blue clip'),
+    {
+      id: 'music',
+      kind: 'audio',
+      uri: f.music.path,
+      label: 'Music bed',
+      durationMs: f.music.probe.durationMs,
+      hasAudio: f.music.probe.hasAudio,
+    },
+  ];
+
+  const video: Track = {
+    id: 'video',
+    kind: 'video',
+    name: 'Main',
+    clips: [
+      makeClip('clip-red', 'red', {
+        inMs: 200,
+        outMs: 1500,
+        volume: 0.8,
+        transitionOut: { id: 'tr-fade', type: 'fade', durationMs: 300 },
+      }),
+      makeClip('clip-blue', 'blue', { inMs: 0, outMs: 1200 }),
+    ],
+    items: [],
+  };
+
+  const text: Track = {
+    id: 'text',
+    kind: 'text',
+    name: 'Titles',
+    clips: [],
+    items: [
+      {
+        id: 'title',
+        text: 'EDITBAY',
+        startMs: 0,
+        durationMs: 1500,
+        style: { ...DEFAULT_TEXT_STYLE, fontSize: 28, x: 0.5, y: 0.82 },
+      },
+    ],
+  };
+
+  const audio: Track = {
+    id: 'audio',
+    kind: 'audio',
+    name: 'Music',
+    clips: [
+      makeClip('clip-music', 'music', {
+        inMs: 0,
+        outMs: 1200,
+        startMs: 500,
+        volume: 0.4,
+        audioFadeInMs: 200,
+        audioFadeOutMs: 300,
+      }),
+    ],
+    items: [],
+  };
+
+  return {
+    schemaVersion: 2,
+    id: 'showreel',
+    name: 'Showreel',
+    canvas: CANVAS,
+    assets,
+    tracks: [video, text, audio],
+    createdAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: '2026-01-01T00:00:00.000Z',
+  };
+}
+
+function assetPathsOf(project: Project): Record<string, string> {
+  const paths: Record<string, string> = {};
+  for (const asset of project.assets) paths[asset.id] = asset.uri;
+  return paths;
+}
+
+/** Center pixel of a frame as RGB, decoded through ffmpeg rawvideo. */
+async function centerPixel(filePath: string, atMs: number): Promise<[number, number, number]> {
+  const result = await runCommandBuffer(resolveFfmpeg(), [
+    '-hide_banner',
+    '-loglevel',
+    'error',
+    '-ss',
+    (atMs / 1000).toFixed(3),
+    '-i',
+    filePath,
+    '-frames:v',
+    '1',
+    '-f',
+    'rawvideo',
+    '-pix_fmt',
+    'rgb24',
+    'pipe:1',
+  ]);
+  expect(result.code).toBe(0);
+  expect(result.stdout.length).toBe(CANVAS.width * CANVAS.height * 3);
+  const x = Math.floor(CANVAS.width / 2);
+  const y = Math.floor(CANVAS.height / 2);
+  const offset = (y * CANVAS.width + x) * 3;
+  return [result.stdout[offset] ?? -1, result.stdout[offset + 1] ?? -1, result.stdout[offset + 2] ?? -1];
+}
+
+suite('engine e2e (real ffmpeg)', () => {
+  beforeAll(async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'editbay-engine-e2e-'));
+    const redPath = path.join(dir, 'red.mp4');
+    const bluePath = path.join(dir, 'blue.mp4');
+    const musicPath = path.join(dir, 'music.m4a');
+    const imagePath = path.join(dir, 'still.png');
+
+    await runFfmpeg([
+      '-y',
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-f',
+      'lavfi',
+      '-i',
+      'color=c=red:s=320x240:r=30:d=2',
+      '-f',
+      'lavfi',
+      '-i',
+      'sine=frequency=440:sample_rate=48000:duration=2',
+      '-c:v',
+      'libx264',
+      '-preset',
+      'ultrafast',
+      '-pix_fmt',
+      'yuv420p',
+      '-c:a',
+      'aac',
+      '-b:a',
+      '128k',
+      '-shortest',
+      redPath,
+    ]);
+    await runFfmpeg([
+      '-y',
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-f',
+      'lavfi',
+      '-i',
+      'color=c=blue:s=320x240:r=30:d=2',
+      '-f',
+      'lavfi',
+      '-i',
+      'sine=frequency=660:sample_rate=48000:duration=2',
+      '-c:v',
+      'libx264',
+      '-preset',
+      'ultrafast',
+      '-pix_fmt',
+      'yuv420p',
+      '-c:a',
+      'aac',
+      '-b:a',
+      '128k',
+      '-shortest',
+      bluePath,
+    ]);
+    await runFfmpeg([
+      '-y',
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-f',
+      'lavfi',
+      '-i',
+      'sine=frequency=220:sample_rate=48000:duration=1.5',
+      '-c:a',
+      'aac',
+      musicPath,
+    ]);
+    await runFfmpeg([
+      '-y',
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-f',
+      'lavfi',
+      '-i',
+      'color=c=green:s=320x240:r=30:d=1',
+      '-frames:v',
+      '1',
+      imagePath,
+    ]);
+
+    const [redProbe, blueProbe, musicProbe, imageProbe] = await Promise.all([
+      probeMedia(redPath),
+      probeMedia(bluePath),
+      probeMedia(musicPath),
+      probeMedia(imagePath),
+    ]);
+
+    fixtures = {
+      dir,
+      red: { path: redPath, probe: redProbe },
+      blue: { path: bluePath, probe: blueProbe },
+      music: { path: musicPath, probe: musicProbe },
+      image: { path: imagePath, probe: imageProbe },
+    };
+  });
+
+  afterAll(async () => {
+    if (fixtures) await rm(fixtures.dir, { recursive: true, force: true });
+  });
+
+  it('probes the synthetic fixtures', () => {
+    const f = fixture();
+    expect(f.red.probe.width).toBe(320);
+    expect(f.red.probe.height).toBe(240);
+    expect(f.red.probe.fps).toBe(30);
+    expect(f.red.probe.hasAudio).toBe(true);
+    expect(f.red.probe.videoCodec).toBe('h264');
+    expect(f.red.probe.durationMs).toBeGreaterThan(1800);
+    expect(f.music.probe.hasAudio).toBe(true);
+    expect(f.music.probe.videoCodec).toBeUndefined();
+    expect(f.image.probe.hasAudio).toBe(false);
+  });
+
+  it('exports the showreel with a transition, text and mixed audio', async () => {
+    const project = buildShowreel();
+    const outPath = path.join(fixture().dir, 'showreel.mp4');
+    const progress: ExportProgress[] = [];
+
+    const result = await exportProject(project, {
+      outPath,
+      assetPaths: assetPathsOf(project),
+      quality: 'draft',
+      onProgress: (entry) => progress.push(entry),
+    });
+
+    // 1300ms + 1200ms - 300ms transition
+    expect(result.durationMs).toBe(2200);
+    expect(result.sizeBytes).toBeGreaterThan(2000);
+    expect(result.elapsedMs).toBeGreaterThan(0);
+    expect(existsSync(outPath)).toBe(true);
+    expect((await stat(outPath)).size).toBe(result.sizeBytes);
+
+    const probe = await probeMedia(outPath);
+    expect(probe.width).toBe(320);
+    expect(probe.height).toBe(240);
+    expect(probe.fps).toBe(30);
+    expect(probe.videoCodec).toBe('h264');
+    expect(probe.audioCodec).toBe('aac');
+    expect(probe.hasAudio).toBe(true);
+    expect(Math.abs(probe.durationMs - 2200)).toBeLessThanOrEqual(300);
+
+    // Progress is monotonic and reaches the end.
+    expect(progress.length).toBeGreaterThan(0);
+    const fractions = progress.map((entry) => entry.fraction);
+    for (let i = 1; i < fractions.length; i += 1) {
+      expect(fractions[i]!).toBeGreaterThanOrEqual(fractions[i - 1]!);
+    }
+    expect(fractions[fractions.length - 1]).toBe(1);
+    expect(progress.some((entry) => entry.outTimeMs !== undefined && entry.outTimeMs > 0)).toBe(true);
+
+    // faststart: moov must come before mdat.
+    const bytes = await readFile(outPath);
+    const moov = bytes.indexOf('moov');
+    const mdat = bytes.indexOf('mdat');
+    expect(moov).toBeGreaterThan(0);
+    expect(mdat).toBeGreaterThan(0);
+    expect(moov).toBeLessThan(mdat);
+
+    // Picture content: red before the crossfade, blue after it.
+    const [r, g, b] = await centerPixel(outPath, 500);
+    expect(Math.abs(r - 255)).toBeLessThanOrEqual(40);
+    expect(g).toBeLessThanOrEqual(40);
+    expect(b).toBeLessThanOrEqual(40);
+
+    const [r2, g2, b2] = await centerPixel(outPath, 1800);
+    expect(r2).toBeLessThanOrEqual(40);
+    expect(g2).toBeLessThanOrEqual(40);
+    expect(Math.abs(b2 - 255)).toBeLessThanOrEqual(40);
+  });
+
+  it('extracts data-url frames and writes thumbnails', async () => {
+    const f = fixture();
+    const dataUrl = await extractFrameDataUrl(f.red.path, 500, 160);
+    expect(dataUrl.startsWith('data:image/jpeg;base64,')).toBe(true);
+
+    const jpeg = Buffer.from(dataUrl.slice('data:image/jpeg;base64,'.length), 'base64');
+    expect(jpeg.length).toBeGreaterThan(200);
+    expect(jpeg[0]).toBe(0xff);
+    expect(jpeg[1]).toBe(0xd8);
+    expect(jpeg[jpeg.length - 2]).toBe(0xff);
+    expect(jpeg[jpeg.length - 1]).toBe(0xd9);
+
+    const thumbPath = path.join(f.dir, 'thumb.jpg');
+    await makeThumbnail(f.blue.path, thumbPath, { atMs: 300, width: 160 });
+    expect((await stat(thumbPath)).size).toBeGreaterThan(200);
+    const thumbProbe = await probeMedia(thumbPath);
+    expect(thumbProbe.width).toBe(160);
+  });
+
+  it('exports a silent still image without an audio stream', async () => {    const f = fixture();
+    const imageAsset: Asset = {
+      id: 'still',
+      kind: 'image',
+      uri: f.image.path,
+      label: 'Still',
+      durationMs: 1000,
+      width: f.image.probe.width,
+      height: f.image.probe.height,
+      hasAudio: false,
+    };
+    const project: Project = {
+      schemaVersion: 2,
+      id: 'still-project',
+      name: 'Still',
+      canvas: CANVAS,
+      assets: [imageAsset],
+      tracks: [
+        {
+          id: 'video',
+          kind: 'video',
+          clips: [makeClip('still-clip', 'still', { inMs: 0, outMs: 1000, volume: 0 })],
+          items: [],
+        },
+      ],
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    };
+
+    const plan = buildRenderPlan(project, {
+      assetPaths: assetPathsOf(project),
+      quality: 'draft',
+      outPath: path.join(f.dir, 'still.mp4'),
+      textFileDir: f.dir,
+    });
+    expect(plan.args).toContain('-loop');
+    expect(plan.filterGraph).not.toContain('[aout]');
+
+    const outPath = path.join(f.dir, 'still.mp4');
+    const result = await exportProject(project, {
+      outPath,
+      assetPaths: assetPathsOf(project),
+      quality: 'draft',
+    });
+    expect(result.durationMs).toBe(1000);
+
+    const probe = await probeMedia(outPath);
+    expect(probe.hasAudio).toBe(false);
+    expect(probe.width).toBe(320);
+    expect(probe.height).toBe(240);
+    expect(Math.abs(probe.durationMs - 1000)).toBeLessThanOrEqual(300);
+  });
+
+  it('aborts cleanly without leaving partial files', async () => {
+    const project = buildShowreel();
+    const outDir = path.join(fixture().dir, 'aborted');
+    const outPath = path.join(outDir, 'aborted.mp4');
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(
+      exportProject(project, {
+        outPath,
+        assetPaths: assetPathsOf(project),
+        quality: 'draft',
+        signal: controller.signal,
+      }),
+    ).rejects.toThrow(/aborted/i);
+
+    expect(existsSync(outPath)).toBe(false);
+    const leftovers = existsSync(outDir) ? await readdir(outDir) : [];
+    expect(leftovers).toEqual([]);
+  });
+});

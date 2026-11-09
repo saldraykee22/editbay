@@ -1,0 +1,38 @@
+{
+  "name": "editbay",
+  "version": "0.1.0",
+  "private": true,
+  "description": "The AI cutting room for brands. Local-first, open-source video studio with an agent harness.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "packageManager": "pnpm@10.32.1",
+  "engines": {
+    "node": ">=20.19"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "electron",
+      "@parcel/watcher",
+      "sharp"
+    ]
+  },
+  "scripts": {
+    "dev": "pnpm --filter @editbay/desktop dev",
+    "build": "pnpm --filter @editbay/desktop build",
+    "start": "pnpm --filter @editbay/desktop start",
+    "typecheck": "tsc -p packages/core && tsc -p packages/effects && tsc -p packages/harness && tsc -p packages/engine && tsc -p packages/ui && pnpm --filter @editbay/desktop typecheck",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "e2e": "node scripts/e2e-app.mjs && node scripts/e2e-agent.mjs",
+    "lint": "eslint . --max-warnings 0",
+    "format": "prettier --write ."
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "electron-builder": "25.1.8",
+    "playwright": "1.49.1",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}
