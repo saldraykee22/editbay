@@ -11,7 +11,7 @@ import {
 } from 'node:fs';
 import { extname, join, normalize, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { exportProject, probeMedia, getFfmpegInfo, extractFrameDataUrl } from '@editbay/engine';
+import { exportProject, probeMedia, getFfmpegInfo, extractFrameDataUrl, extractPeaks } from '@editbay/engine';
 import { getProvider } from '@editbay/harness';
 import type {
   AppInfoDTO,
@@ -399,6 +399,19 @@ function registerIpc(): void {
     return path;
   });
 
+  // Bounded caches: filmstrip frames are data URLs, so an unbounded map would
+  // grow with every zoom level and clip the user ever looked at.
+  const CACHE_LIMIT = 600;
+  const frameCache = new Map<string, string>();
+  const peaksCache = new Map<string, number[]>();
+  const remember = <T,>(cache: Map<string, T>, key: string, value: T): void => {
+    if (cache.size >= CACHE_LIMIT) {
+      const oldest = cache.keys().next().value;
+      if (oldest !== undefined) cache.delete(oldest);
+    }
+    cache.set(key, value);
+  };
+
   ipcMain.handle('media:probe', async (_e, path: string) => {
     assertMediaAllowed(path);
     return probeMedia(path);
@@ -407,6 +420,68 @@ function registerIpc(): void {
     assertMediaAllowed(path);
     return extractFrameDataUrl(path, atMs, width);
   });
+  ipcMain.handle(
+    'media:filmstrip',
+    async (
+      _e,
+      path: string,
+      opts?: { inMs?: number; outMs?: number; count?: number; width?: number } | number[],
+      widthArg?: number,
+    ): Promise<string[]> => {
+      assertMediaAllowed(path);
+      const normalized = normalizeFsPath(path);
+      let timestamps: number[] = [];
+      let frameWidth = 140;
+      if (Array.isArray(opts)) {
+        timestamps = opts.slice(0, 12).map((t) => Math.max(0, Math.round(Number(t) || 0)));
+        if (typeof widthArg === 'number' && widthArg > 0) frameWidth = Math.min(320, Math.round(widthArg));
+      } else {
+        const count = Math.max(1, Math.min(12, Math.floor(opts?.count ?? 4)));
+        const inMs = Math.max(0, Math.round(opts?.inMs ?? 0));
+        const outMs = Math.max(inMs + 100, Math.round(opts?.outMs ?? inMs + 1000));
+        if (typeof opts?.width === 'number' && opts.width > 0) frameWidth = Math.min(320, Math.round(opts.width));
+        const span = Math.max(100, outMs - inMs);
+        for (let i = 0; i < count; i += 1) {
+          timestamps.push(Math.round(inMs + ((i + 0.5) / count) * span));
+        }
+      }
+      const frames = await Promise.all(
+        timestamps.map(async (atMs) => {
+          const cacheKey = `${normalized}@${atMs}@${frameWidth}`;
+          const hit = frameCache.get(cacheKey);
+          if (hit) return hit;
+          try {
+            const dataUrl = await extractFrameDataUrl(path, atMs, frameWidth);
+            remember(frameCache, cacheKey, dataUrl);
+            return dataUrl;
+          } catch {
+            return '';
+          }
+        }),
+      );
+      return frames.filter(Boolean);
+    },
+  );
+  ipcMain.handle(
+    'media:peaks',
+    async (_e, path: string, opts?: { buckets?: number; inMs?: number; outMs?: number } | number): Promise<number[]> => {
+      assertMediaAllowed(path);
+      const bucketsRaw = typeof opts === 'number' ? opts : (opts?.buckets ?? 64);
+      const buckets = Math.max(8, Math.min(256, Math.round(bucketsRaw)));
+      const inMs = typeof opts === 'object' && opts !== null ? opts.inMs : undefined;
+      const outMs = typeof opts === 'object' && opts !== null ? opts.outMs : undefined;
+      const cacheKey = `${normalizeFsPath(path)}:${inMs ?? 0}:${outMs ?? 'end'}:${buckets}`;
+      const hit = peaksCache.get(cacheKey);
+      if (hit) return hit;
+      try {
+        const peaks = await extractPeaks(path, { buckets, inMs, outMs });
+        remember(peaksCache, cacheKey, peaks);
+        return peaks;
+      } catch {
+        return [];
+      }
+    },
+  );
 
   ipcMain.handle('dialog:saveVideo', async (_e, defaultName: string): Promise<string | null> => {
     if (process.env['EDITBAY_TEST_EXPORT']) {

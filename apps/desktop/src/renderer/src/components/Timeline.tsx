@@ -1,7 +1,7 @@
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Clip, TextItem, Track } from '@editbay/core';
 import { clipTimelineDurationMs } from '@editbay/core';
-import { Button, Field, IconButton, Input, Modal, Select, Textarea } from '@editbay/ui';
+import { Button, IconButton } from '@editbay/ui';
 import { EditorStore, useEditorVersion, usePlayhead } from '../state/store';
 import { videoClips } from '../lib/compositor';
 import { Inspector } from './Inspector';
@@ -15,6 +15,16 @@ interface DragState {
 }
 
 const TRACK_H = 56;
+const LANE_H = 44;
+const LANE_GAP = 6;
+const TRACK_PAD = 6;
+const WAVEFORM_BUCKETS = 72;
+
+/** Renderer-side caches keyed by assetId + source time window. */
+const filmstripCache = new Map<string, string[]>();
+const filmstripPending = new Set<string>();
+const waveformCache = new Map<string, number[]>();
+const waveformPending = new Set<string>();
 
 function formatRuler(seconds: number): string {
   if (seconds >= 60) {
@@ -25,19 +35,106 @@ function formatRuler(seconds: number): string {
   return `${seconds}s`;
 }
 
+function computeTextLanes(
+  items: TextItem[],
+  drag: DragState | null,
+): { laneById: Map<string, number>; laneCount: number } {
+  const laneById = new Map<string, number>();
+  if (items.length === 0) return { laneById, laneCount: 1 };
+
+  const decorated = items.map((item, index) => {
+    const dragging = drag && drag.kind === 'text' && drag.id === item.id;
+    const startMs = Math.max(0, item.startMs + (dragging ? drag.deltaMs : 0));
+    const endMs = startMs + Math.max(200, item.durationMs);
+    return { item, index, startMs, endMs };
+  });
+
+  decorated.sort((a, b) => (a.startMs !== b.startMs ? a.startMs - b.startMs : a.index - b.index));
+
+  const laneEnds: number[] = [];
+  for (const entry of decorated) {
+    let assigned = -1;
+    for (let lane = 0; lane < laneEnds.length; lane += 1) {
+      if ((laneEnds[lane] ?? 0) <= entry.startMs) {
+        assigned = lane;
+        laneEnds[lane] = entry.endMs;
+        break;
+      }
+    }
+    if (assigned < 0) {
+      assigned = laneEnds.length;
+      laneEnds.push(entry.endMs);
+    }
+    laneById.set(entry.item.id, assigned);
+  }
+
+  return { laneById, laneCount: Math.max(1, laneEnds.length) };
+}
+
 export function Timeline({ store }: { store: EditorStore }) {
   useEditorVersion(store);
   const playheadMs = usePlayhead(store);
   const project = store.project;
-  const [zoom, setZoom] = useState(store.pxPerSec);
+  const [userZoom, setUserZoom] = useState<number | null>(null);
+  const [scrollWidth, setScrollWidth] = useState(0);
   const [drag, setDrag] = useState<DragState | null>(null);
   const [editing, setEditing] = useState<{ kind: 'text'; id: string } | { kind: 'clip'; id: string } | null>(null);
+  const [, setMediaTick] = useState(0);
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  const pxPerSec = zoom;
+  // Reset to Fit mode when a different project is loaded.
+  useEffect(() => {
+    setUserZoom(null);
+  }, [project.id]);
+
+  // Measure visible timeline width so Fit zoom fills ~95% of available space.
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const updateWidth = () => {
+      if (el.clientWidth > 0) setScrollWidth(el.clientWidth);
+    };
+    updateWidth();
+    const observer = new ResizeObserver(updateWidth);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
   const duration = store.durationMs;
-  const contentSeconds = Math.max(6, duration / 1000 + 1.5);
-  const contentWidth = contentSeconds * pxPerSec;
+  const durationSeconds = Math.max(1, duration / 1000);
+  const fitZoom = useMemo(() => {
+    if (scrollWidth <= 0 || duration <= 0) return store.pxPerSec;
+    return Math.max(18, Math.min(400, Math.round((scrollWidth * 0.95) / durationSeconds)));
+  }, [scrollWidth, duration, durationSeconds, store.pxPerSec]);
+
+  const pxPerSec = userZoom ?? fitZoom;
+
+  useEffect(() => {
+    store.pxPerSec = pxPerSec;
+  }, [pxPerSec, store]);
+
+  // Ctrl + wheel zoom on the timeline scroll container.
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const onWheel = (event: WheelEvent) => {
+      if (!event.ctrlKey && !event.metaKey) return;
+      event.preventDefault();
+      const factor = event.deltaY < 0 ? 1.15 : 1 / 1.15;
+      setUserZoom((prev) => {
+        const current = prev ?? fitZoom;
+        return Math.max(18, Math.min(400, Math.round(current * factor)));
+      });
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, [fitZoom]);
+
+  const contentWidth =
+    userZoom === null
+      ? Math.max(scrollWidth, Math.ceil(durationSeconds * pxPerSec))
+      : Math.max(scrollWidth, Math.ceil((durationSeconds + 0.5) * pxPerSec));
+  const contentSeconds = pxPerSec > 0 ? Math.max(durationSeconds, contentWidth / pxPerSec) : durationSeconds;
 
   const clipStarts = useMemo(() => {
     const map = new Map<string, number>();
@@ -53,6 +150,65 @@ export function Timeline({ store }: { store: EditorStore }) {
   }, [contentSeconds, tickStep]);
 
   const msToPx = (ms: number) => (ms / 1000) * pxPerSec;
+
+  // Fetch filmstrip frames for video clips and waveform peaks for audio clips.
+  useEffect(() => {
+    let cancelled = false;
+    const bump = () => {
+      if (!cancelled) setMediaTick((v) => v + 1);
+    };
+
+    for (const track of project.tracks) {
+      for (const clip of track.clips) {
+        const asset = project.assets.find((a) => a.id === clip.assetId);
+        if (!asset) continue;
+
+        if ((track.kind === 'video' || track.kind === 'overlay') && (asset.kind === 'video' || asset.kind === 'image')) {
+          const clipWidth = Math.max(12, (clipTimelineDurationMs(clip) / 1000) * pxPerSec);
+          const count = Math.max(2, Math.min(12, Math.round(clipWidth / 56)));
+          const key = `${asset.id}:${clip.inMs}-${clip.outMs}:${count}`;
+          if (!filmstripCache.has(key) && !filmstripPending.has(key) && typeof window.editbay?.filmstrip === 'function') {
+            filmstripPending.add(key);
+            void window.editbay
+              .filmstrip(asset.uri, { inMs: clip.inMs, outMs: clip.outMs, count, width: 140 })
+              .then((frames) => {
+                if (frames && frames.length > 0) {
+                  filmstripCache.set(key, frames);
+                  bump();
+                }
+              })
+              .catch(() => undefined)
+              .finally(() => {
+                filmstripPending.delete(key);
+              });
+          }
+        }
+
+        if (track.kind === 'audio' && (asset.kind === 'audio' || asset.hasAudio)) {
+          const key = `${asset.id}:${clip.inMs}-${clip.outMs}:${WAVEFORM_BUCKETS}`;
+          if (!waveformCache.has(key) && !waveformPending.has(key) && typeof window.editbay?.peaks === 'function') {
+            waveformPending.add(key);
+            void window.editbay
+              .peaks(asset.uri, { buckets: WAVEFORM_BUCKETS, inMs: clip.inMs, outMs: clip.outMs })
+              .then((peaks) => {
+                if (peaks && peaks.length > 0) {
+                  waveformCache.set(key, peaks);
+                  bump();
+                }
+              })
+              .catch(() => undefined)
+              .finally(() => {
+                waveformPending.delete(key);
+              });
+          }
+        }
+      }
+    }
+
+    return () => {
+      cancelled = true;
+    };
+  }, [project, pxPerSec]);
 
   const seekFromEvent = (clientX: number) => {
     const scroll = scrollRef.current;
@@ -91,7 +247,6 @@ export function Timeline({ store }: { store: EditorStore }) {
       if (!location) return;
 
       if (location.track.kind !== 'video') {
-        // Audio and overlay clips are placed absolutely; the drop must persist.
         const startMs = Math.max(0, Math.round(original.startMs + deltaMs));
         store.apply({ op: 'set_audio_start', clipId: id, startMs });
         return;
@@ -126,7 +281,6 @@ export function Timeline({ store }: { store: EditorStore }) {
         .find((entry) => entry.clip.id === id);
       if (!location) return;
       const speed = location.clip.speed && location.clip.speed > 0 ? location.clip.speed : 1;
-      // Trim handles move on the timeline; source time advances by speed.
       const sourceDeltaMs = Math.round(deltaMs * speed);
       const nextIn = Math.round(original.inMs + (kind === 'trim-left' ? sourceDeltaMs : 0));
       const nextOut = Math.round(original.outMs + (kind === 'trim-right' ? sourceDeltaMs : 0));
@@ -155,6 +309,13 @@ export function Timeline({ store }: { store: EditorStore }) {
     const width = Math.max(12, msToPx(durationMs));
     const className = `clip ${selected ? 'selected' : ''} ${track.kind === 'audio' ? 'audio-clip' : ''}`;
 
+    const frameCount = Math.max(2, Math.min(12, Math.round(width / 56)));
+    const filmstripKey = asset ? `${asset.id}:${clip.inMs}-${clip.outMs}:${frameCount}` : '';
+    const frames = filmstripKey ? filmstripCache.get(filmstripKey) : undefined;
+
+    const waveformKey = asset ? `${asset.id}:${clip.inMs}-${clip.outMs}:${WAVEFORM_BUCKETS}` : '';
+    const peaks = track.kind === 'audio' && waveformKey ? waveformCache.get(waveformKey) : undefined;
+
     return (
       <div
         key={clip.id}
@@ -173,9 +334,47 @@ export function Timeline({ store }: { store: EditorStore }) {
         onDoubleClick={() => setEditing({ kind: 'clip', id: clip.id })}
         title={`${asset?.label ?? clip.assetId} · ${(durationMs / 1000).toFixed(2)}s`}
       >
-        {asset?.thumbnailUri ? (
+        {frames && frames.length > 0 ? (
+          <div className="clip-filmstrip" aria-hidden="true">
+            {frames.map((src, frameIndex) => (
+              <div
+                key={frameIndex}
+                className="clip-filmstrip-frame"
+                style={{ backgroundImage: `url(${src})` }}
+              />
+            ))}
+          </div>
+        ) : asset?.thumbnailUri ? (
           <div className="thumb" style={{ backgroundImage: `url(${asset.thumbnailUri})` }} />
         ) : null}
+
+        {peaks && peaks.length > 0 ? (
+          <svg
+            className="clip-waveform"
+            viewBox={`0 0 ${peaks.length * 4} 44`}
+            preserveAspectRatio="none"
+            aria-hidden="true"
+          >
+            {(() => {
+              const maxPeak = Math.max(0.15, ...peaks);
+              return peaks.map((peak, peakIdx) => {
+                const ratio = Math.min(1, peak / maxPeak);
+                const barH = Math.max(4, Math.min(36, Math.round(ratio * 30)));
+                return (
+                  <rect
+                    key={peakIdx}
+                    x={peakIdx * 4 + 1}
+                    y={Math.round((44 - barH) / 2)}
+                    width={2}
+                    height={barH}
+                    rx={0.75}
+                  />
+                );
+              });
+            })()}
+          </svg>
+        ) : null}
+
         <div className="meta">
           <div className="name">{asset?.label ?? `clip ${index + 1}`}</div>
           <div className="dur">{(durationMs / 1000).toFixed(2)}s</div>
@@ -210,16 +409,17 @@ export function Timeline({ store }: { store: EditorStore }) {
     );
   };
 
-  const renderText = (item: TextItem) => {
+  const renderText = (item: TextItem, lane: number) => {
     const dragging = drag && drag.id === item.id;
     const left = msToPx(item.startMs + (dragging ? drag.deltaMs : 0));
     const width = Math.max(18, msToPx(item.durationMs));
     const selected = store.selection.itemId === item.id;
+    const top = TRACK_PAD + lane * (LANE_H + LANE_GAP);
     return (
       <div
         key={item.id}
         className={`clip text-clip ${selected ? 'selected' : ''}`}
-        style={{ left, width, top: 6 }}
+        style={{ left, width, top, height: LANE_H }}
         onPointerDown={(event) => {
           event.stopPropagation();
           beginDrag(event, {
@@ -244,6 +444,18 @@ export function Timeline({ store }: { store: EditorStore }) {
   };
 
   const tracks = project.tracks.filter((t) => t.kind === 'video' || t.kind === 'text' || t.kind === 'audio').slice(0, 3);
+
+  const trackLayouts = useMemo(() => {
+    return tracks.map((track) => {
+      if (track.kind !== 'text') {
+        return { track, height: TRACK_H, laneById: new Map<string, number>() };
+      }
+      const { laneById, laneCount } = computeTextLanes(track.items, drag);
+      const height =
+        laneCount <= 1 ? TRACK_H : TRACK_PAD * 2 + laneCount * LANE_H + (laneCount - 1) * LANE_GAP;
+      return { track, height, laneById };
+    });
+  }, [tracks, drag]);
 
   return (
     <div className="timeline">
@@ -270,7 +482,7 @@ export function Timeline({ store }: { store: EditorStore }) {
           icon="scissors"
           title="Split at playhead (S)"
           onClick={() => {
-            const active = [...project.tracks.find((t) => t.kind === 'video')?.clips ?? []].find((clip) => {
+            const active = [...(project.tracks.find((t) => t.kind === 'video')?.clips ?? [])].find((clip) => {
               const start = clipStarts.get(clip.id) ?? 0;
               return playheadMs > start && playheadMs < start + clipTimelineDurationMs(clip);
             });
@@ -289,27 +501,44 @@ export function Timeline({ store }: { store: EditorStore }) {
           }}
         />
         <div className="hairline" style={{ width: 1, height: 16, background: 'var(--line-strong)' }} />
-        <IconButton icon="x" title="Zoom out" onClick={() => setZoom((z) => Math.max(18, Math.round(z * 0.8)))} />
-        <span className="mono" style={{ fontSize: 10, color: 'var(--text-faint)', width: 42, textAlign: 'center' }}>
+        <Button
+          size="sm"
+          variant="ghost"
+          className={`fit-btn ${userZoom === null ? 'active' : ''}`}
+          title="Fit project to timeline width"
+          onClick={() => {
+            setUserZoom(null);
+            if (scrollRef.current) scrollRef.current.scrollLeft = 0;
+          }}
+        >
+          Fit
+        </Button>
+        <IconButton
+          icon="x"
+          title="Zoom out (Ctrl+Wheel)"
+          onClick={() => setUserZoom((z) => Math.max(18, Math.round((z ?? fitZoom) * 0.8)))}
+        />
+        <span className="mono" style={{ fontSize: 11, color: 'var(--text-faint)', minWidth: 46, textAlign: 'center' }}>
           {pxPerSec}px
         </span>
-        <IconButton icon="plus" title="Zoom in" onClick={() => setZoom((z) => Math.min(260, Math.round(z * 1.25)))} />
+        <IconButton
+          icon="plus"
+          title="Zoom in (Ctrl+Wheel)"
+          onClick={() => setUserZoom((z) => Math.min(400, Math.round((z ?? fitZoom) * 1.25)))}
+        />
       </div>
       <div className="timeline-body">
         <div className="track-labels">
           <div style={{ height: 24, borderBottom: '1px solid var(--line)' }} />
-          {tracks.map((track) => (
-            <div key={track.id} className={`track-label ${track.kind}`}>
+          {trackLayouts.map(({ track, height }) => (
+            <div key={track.id} className={`track-label ${track.kind}`} style={{ height }}>
               <span className="dot" />
-              {track.kind}
-              <span className="mono" style={{ marginLeft: 'auto', fontSize: 9 }}>
-                {track.kind === 'text' ? track.items.length : track.clips.length}
-              </span>
+              <span>{track.kind}</span>
             </div>
           ))}
         </div>
         <div className="timeline-scroll" ref={scrollRef}>
-          <div style={{ width: contentWidth, position: 'relative' }}>
+          <div style={{ width: contentWidth, minWidth: '100%', position: 'relative' }}>
             <div
               className="ruler"
               onPointerDown={(event) => {
@@ -326,10 +555,10 @@ export function Timeline({ store }: { store: EditorStore }) {
                 </div>
               ))}
             </div>
-            {tracks.map((track) => (
-              <div key={track.id} className="track-row" style={{ height: TRACK_H }}>
+            {trackLayouts.map(({ track, height, laneById }) => (
+              <div key={track.id} className="track-row" style={{ height }}>
                 {track.kind === 'text'
-                  ? track.items.map(renderText)
+                  ? track.items.map((item) => renderText(item, laneById.get(item.id) ?? 0))
                   : track.clips.map((clip, index) => renderClip(track, clip, index))}
               </div>
             ))}

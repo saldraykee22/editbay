@@ -6,6 +6,8 @@ import type {
   ExportDoneDTO,
   ExportProgressDTO,
   ExportRequestDTO,
+  FilmstripOptionsDTO,
+  PeaksOptionsDTO,
   PickedMedia,
   ProbeDTO,
 } from '../shared/api';
@@ -16,6 +18,10 @@ const api = {
   pickLogo: (): Promise<string | null> => ipcRenderer.invoke('media:pickLogo'),
   probeMedia: (path: string): Promise<ProbeDTO> => ipcRenderer.invoke('media:probe', path),
   thumbnail: (path: string, atMs = 0, width = 320): Promise<string> => ipcRenderer.invoke('media:thumbnail', path, atMs, width),
+  filmstrip: (path: string, opts?: FilmstripOptionsDTO | number[], width?: number): Promise<string[]> =>
+    ipcRenderer.invoke('media:filmstrip', path, opts, width),
+  peaks: (path: string, opts?: PeaksOptionsDTO | number): Promise<number[]> =>
+    ipcRenderer.invoke('media:peaks', path, opts),
   mediaUrl: (path: string): string => `editbay-media://local/${encodeURIComponent(path)}`,
   saveVideoDialog: (defaultName: string): Promise<string | null> => ipcRenderer.invoke('dialog:saveVideo', defaultName),
   exportVideo: (req: ExportRequestDTO): Promise<ExportDoneDTO> => ipcRenderer.invoke('export:video', req),

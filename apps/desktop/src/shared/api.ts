@@ -21,6 +21,19 @@ export interface ProbeDTO {
   hasAudio: boolean;
 }
 
+export interface FilmstripOptionsDTO {
+  inMs?: number;
+  outMs?: number;
+  count?: number;
+  width?: number;
+}
+
+export interface PeaksOptionsDTO {
+  buckets?: number;
+  inMs?: number;
+  outMs?: number;
+}
+
 export interface ExportRequestDTO {
   project: Project;
   assetPaths: Record<string, string>;
@@ -88,6 +101,8 @@ export interface EditbayApi {
   pickLogo(): Promise<string | null>;
   probeMedia(path: string): Promise<ProbeDTO>;
   thumbnail(path: string, atMs?: number, width?: number): Promise<string>;
+  filmstrip(path: string, opts?: FilmstripOptionsDTO | number[], width?: number): Promise<string[]>;
+  peaks(path: string, opts?: PeaksOptionsDTO | number): Promise<number[]>;
   mediaUrl(path: string): string;
   saveVideoDialog(defaultName: string): Promise<string | null>;
   exportVideo(req: ExportRequestDTO): Promise<ExportDoneDTO>;

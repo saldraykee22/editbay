@@ -6,3 +6,4 @@ export * from './probe';
 export * from './plan';
 export * from './export';
 export * from './thumbs';
+export * from './waveform';

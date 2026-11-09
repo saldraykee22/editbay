@@ -77,20 +77,50 @@ export function Stage({
   useEditorVersion(store);
   const playheadMs = usePlayhead(store);
   const project = store.project;
+  const viewportRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const frameRef = useRef<HTMLDivElement>(null);
   const media = useMediaElements(project);
   const [muted, setMuted] = useState(false);
   const [fps, setFps] = useState(0);
   const [ratio, setRatio] = useState(project.canvas.width / project.canvas.height);
+  const [frameSize, setFrameSize] = useState<{ width: number; height: number } | null>(null);
 
   useEffect(() => {
     setRatio(project.canvas.width / project.canvas.height);
   }, [project.canvas.width, project.canvas.height]);
 
   const resize = useCallback(() => {
-    const canvas = canvasRef.current;
+    const viewport = viewportRef.current;
     const frame = frameRef.current;
+    const canvas = canvasRef.current;
+    const aspect = project.canvas.width / project.canvas.height;
+
+    if (viewport && viewport.clientWidth > 0 && viewport.clientHeight > 0) {
+      const maxH = viewport.clientHeight * 0.92;
+      const maxW = viewport.clientWidth * 0.92;
+      let targetH = maxH;
+      let targetW = targetH * aspect;
+      if (targetW > maxW) {
+        targetW = maxW;
+        targetH = targetW / aspect;
+      }
+      const nextW = Math.max(2, Math.round(targetW));
+      const nextH = Math.max(2, Math.round(targetH));
+      setFrameSize((prev) => (prev && prev.width === nextW && prev.height === nextH ? prev : { width: nextW, height: nextH }));
+
+      if (canvas) {
+        const dpr = Math.min(2, window.devicePixelRatio || 1);
+        const cw = Math.max(2, Math.round(nextW * dpr));
+        const ch = Math.max(2, Math.round(nextH * dpr));
+        if (canvas.width !== cw || canvas.height !== ch) {
+          canvas.width = cw;
+          canvas.height = ch;
+        }
+      }
+      return;
+    }
+
     if (!canvas || !frame) return;
     const dpr = Math.min(2, window.devicePixelRatio || 1);
     const width = Math.max(2, Math.round(frame.clientWidth * dpr));
@@ -99,14 +129,15 @@ export function Stage({
       canvas.width = width;
       canvas.height = height;
     }
-  }, []);
+  }, [project.canvas.width, project.canvas.height]);
 
   useEffect(() => {
     const observer = new ResizeObserver(resize);
+    if (viewportRef.current) observer.observe(viewportRef.current);
     if (frameRef.current) observer.observe(frameRef.current);
     resize();
     return () => observer.disconnect();
-  }, [resize]);
+  }, [resize, project.assets.length]);
 
   useEffect(() => {
     let raf = 0;
@@ -192,41 +223,48 @@ export function Stage({
 
   return (
     <div className="stage">
-      {project.assets.length === 0 ? (
-        <div className="stage-empty fade-in">
-          <div className="label">New project</div>
-          <h1>Say what you want. Editbay cuts it.</h1>
-          <p>
-            Import your footage, then describe the edit in the panel on the right. Every change is a validated command — undo
-            always works, and nothing leaves your machine except the text you approve.
-          </p>
-          <button type="button" className="dropzone" onClick={onImport}>
-            <IconButton icon="plus" tabIndex={-1} style={{ pointerEvents: 'none' }} />
-            <div>
-              <div style={{ color: 'var(--text)' }}>Import video, audio or images</div>
-              <div className="hint">mp4, mov, mp3, wav, png, jpg</div>
-            </div>
-          </button>
-        </div>
-      ) : (
-        <>
-          <div className="stage-frame" ref={frameRef} style={{ ['--canvas-ratio' as string]: ratio }}>
+      <div className="stage-viewport" ref={viewportRef}>
+        {project.assets.length === 0 ? (
+          <div className="stage-empty fade-in">
+            <div className="label">New project</div>
+            <h1>Say what you want. Editbay cuts it.</h1>
+            <p>
+              Import your footage, then describe the edit in the panel on the right. Every change is a validated command — undo
+              always works, and nothing leaves your machine except the text you approve.
+            </p>
+            <button type="button" className="dropzone" onClick={onImport}>
+              <IconButton icon="plus" tabIndex={-1} style={{ pointerEvents: 'none' }} />
+              <div>
+                <div style={{ color: 'var(--text)' }}>Import video, audio or images</div>
+                <div className="hint">mp4, mov, mp3, wav, png, jpg</div>
+              </div>
+            </button>
+          </div>
+        ) : (
+          <div
+            className="stage-frame"
+            ref={frameRef}
+            style={
+              frameSize
+                ? { width: frameSize.width, height: frameSize.height, ['--canvas-ratio' as string]: ratio }
+                : { ['--canvas-ratio' as string]: ratio }
+            }
+          >
             <canvas ref={canvasRef} />
           </div>
-          <div className="stage-badge mono">
-            <span>
-              {project.canvas.width}×{project.canvas.height}
-            </span>
-            <span>·</span>
-            <span>{fps} fps ui</span>
+        )}
+        {import.meta.env.DEV ? (
+          <div className="stage-fps mono" aria-hidden="true">
+            {fps} fps
           </div>
-        </>
-      )}
+        ) : null}
+      </div>
 
       <div className="transport">
         <IconButton
           icon={store.playing ? 'pause' : 'play'}
-          title={store.playing ? 'Pause (space)' : 'Play (space)'}
+          title={store.playing ? 'Pause (Space)' : 'Play (Space)'}
+          aria-label={store.playing ? 'Pause (Space)' : 'Play (Space)'}
           onClick={() => {
             if (store.playheadMs >= store.durationMs) store.setPlayhead(0);
             store.setPlaying(!store.playing);
@@ -234,8 +272,9 @@ export function Stage({
           disabled={project.assets.length === 0}
         />
         <IconButton
-          icon={muted ? 'x' : 'music'}
-          title={muted ? 'Unmute' : 'Mute'}
+          icon="music"
+          title={muted ? 'Preview audio muted — click to unmute' : 'Preview audio on — click to mute'}
+          aria-label={muted ? 'Unmute preview audio' : 'Mute preview audio'}
           active={!muted}
           onClick={() => setMuted((m) => !m)}
         />
