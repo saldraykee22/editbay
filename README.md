@@ -4,6 +4,8 @@
 
 > Status: **v0.1 preview**. The editing core, FFmpeg renderer and agent harness work end to end. Expect rough edges; the roadmap is in [docs/roadmap.md](docs/roadmap.md).
 
+![Editbay with an agent edit applied](docs/screenshots/app-agent.png)
+
 ## Why another editor
 
 Video editors are built for people who already know video editing. AI video tools generate generic clips that ignore the brand. Editbay takes the opposite bet: the model never touches pixels directly. It writes **validated commands** against a real timeline, so:

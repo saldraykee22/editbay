@@ -308,7 +308,7 @@ export function App() {
         <span className="sep" />
         <span>{providerPreset(settings.providerId).label}</span>
         <span className="spacer" />
-        <span>{appInfo?.ffmpegVersion ? `ffmpeg ${appInfo.ffmpegVersion.split(' ')[0]}` : 'ffmpeg not found'}</span>
+        <span>{appInfo?.ffmpegVersion ? `ffmpeg ${/^\d+(\.\d+)*/.exec(appInfo.ffmpegVersion)?.[0] ?? 'ok'}` : 'ffmpeg not found'}</span>
         <span className="sep" />
         <span>{settings.autoApply ? 'auto-apply' : 'confirm edits'}</span>
       </footer>

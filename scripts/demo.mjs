@@ -1,12 +1,12 @@
 import { _electron as electron } from 'playwright';
+import { electronPath as electronPathFor } from './lib/electron-path.mjs';
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 const root = resolve(import.meta.dirname, '..');
 const appDir = resolve(root, 'apps/desktop');
-const electronPath =
-  process.env.EDITBAY_ELECTRON ?? resolve(root, 'node_modules/.pnpm/electron@33.4.11/node_modules/electron/dist/electron.exe');
+const electronPath = electronPathFor(root);
 const demoDir = resolve(root, '.demo');
 mkdirSync(demoDir, { recursive: true });
 

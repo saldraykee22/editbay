@@ -1,9 +1,10 @@
 import { _electron as electron } from 'playwright';
 import { resolve } from 'node:path';
+import { electronPath as electronPathFor } from './lib/electron-path.mjs';
 
 const root = resolve(import.meta.dirname, '..');
 const appDir = resolve(root, 'apps/desktop');
-const electronPath = process.env.EDITBAY_ELECTRON ?? resolve(appDir, 'node_modules/electron/dist/electron.exe');
+const electronPath = electronPathFor(root);
 
 const app = await electron.launch({ executablePath: electronPath, args: [appDir], cwd: appDir });
 const page = await app.firstWindow();
