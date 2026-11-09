@@ -21,6 +21,7 @@ export {
   trackDurationMs,
   transitionOverlapMs,
   videoClipStartMs,
+  visualDurationMs,
 } from './timeline';
 export type { ClipLocation, TextLocation } from './timeline';
 

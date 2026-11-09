@@ -41,6 +41,9 @@ interface Fixtures {
   music: { path: string; probe: ProbeResult };
   image: { path: string; probe: ProbeResult };
   tall: { path: string; probe: ProbeResult };
+  longRed: { path: string; probe: ProbeResult };
+  longBlue: { path: string; probe: ProbeResult };
+  longMusic: { path: string; probe: ProbeResult };
 }
 
 let fixtures: Fixtures | undefined;
@@ -190,6 +193,9 @@ suite('engine e2e (real ffmpeg)', () => {
     const musicPath = path.join(dir, 'music.m4a');
     const imagePath = path.join(dir, 'still.png');
     const tallPath = path.join(dir, 'tall.mp4');
+    const longRedPath = path.join(dir, 'long-red.mp4');
+    const longBluePath = path.join(dir, 'long-blue.mp4');
+    const longMusicPath = path.join(dir, 'long-music.m4a');
 
     await runFfmpeg([
       '-y',
@@ -287,6 +293,74 @@ suite('engine e2e (real ffmpeg)', () => {
       probeMedia(tallPath),
     ]);
 
+    // 3 s + 3 s picture with a 0.5 s crossfade and a 10 s music bed: the export
+    // must stop at the picture (5.5 s) instead of trailing the music.
+    await runFfmpeg([
+      '-y',
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-f',
+      'lavfi',
+      '-i',
+      'color=c=red:s=320x240:r=30:d=3',
+      '-f',
+      'lavfi',
+      '-i',
+      'sine=frequency=440:sample_rate=48000:duration=3',
+      ...fixtureEncodeArgs(320, 240),
+      '-pix_fmt',
+      'yuv420p',
+      '-c:a',
+      'aac',
+      '-b:a',
+      '128k',
+      '-shortest',
+      longRedPath,
+    ]);
+    await runFfmpeg([
+      '-y',
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-f',
+      'lavfi',
+      '-i',
+      'color=c=blue:s=320x240:r=30:d=3',
+      '-f',
+      'lavfi',
+      '-i',
+      'sine=frequency=660:sample_rate=48000:duration=3',
+      ...fixtureEncodeArgs(320, 240),
+      '-pix_fmt',
+      'yuv420p',
+      '-c:a',
+      'aac',
+      '-b:a',
+      '128k',
+      '-shortest',
+      longBluePath,
+    ]);
+    await runFfmpeg([
+      '-y',
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-f',
+      'lavfi',
+      '-i',
+      'sine=frequency=220:sample_rate=48000:duration=10',
+      '-c:a',
+      'aac',
+      longMusicPath,
+    ]);
+
+    const [longRedProbe, longBlueProbe, longMusicProbe] = await Promise.all([
+      probeMedia(longRedPath),
+      probeMedia(longBluePath),
+      probeMedia(longMusicPath),
+    ]);
+
     fixtures = {
       dir,
       red: { path: redPath, probe: redProbe },
@@ -294,6 +368,9 @@ suite('engine e2e (real ffmpeg)', () => {
       music: { path: musicPath, probe: musicProbe },
       image: { path: imagePath, probe: imageProbe },
       tall: { path: tallPath, probe: tallProbe },
+      longRed: { path: longRedPath, probe: longRedProbe },
+      longBlue: { path: longBluePath, probe: longBlueProbe },
+      longMusic: { path: longMusicPath, probe: longMusicProbe },
     };
   });
 
@@ -373,6 +450,74 @@ suite('engine e2e (real ffmpeg)', () => {
     expect(r2).toBeLessThanOrEqual(40);
     expect(g2).toBeLessThanOrEqual(40);
     expect(Math.abs(b2 - 255)).toBeLessThanOrEqual(40);
+  });
+
+  it('stops at the picture with a 10 s music bed (no black tail)', async () => {
+    const f = fixture();
+    const red = videoAsset('long-red', f.longRed.path, f.longRed.probe, 'Long red');
+    const blue = videoAsset('long-blue', f.longBlue.path, f.longBlue.probe, 'Long blue');
+    const music: Asset = {
+      id: 'long-music',
+      kind: 'audio',
+      uri: f.longMusic.path,
+      label: 'Long music',
+      durationMs: f.longMusic.probe.durationMs,
+      hasAudio: f.longMusic.probe.hasAudio,
+    };
+
+    const project: Project = {
+      schemaVersion: 2,
+      id: 'no-tail',
+      name: 'No black tail',
+      canvas: CANVAS,
+      assets: [red, blue, music],
+      tracks: [
+        {
+          id: 'video',
+          kind: 'video',
+          clips: [
+            makeClip('long-red-clip', 'long-red', {
+              inMs: 0,
+              outMs: 3000,
+              transitionOut: { id: 'tr-fade', type: 'fade', durationMs: 500 },
+            }),
+            makeClip('long-blue-clip', 'long-blue', { inMs: 0, outMs: 3000 }),
+          ],
+          items: [],
+        },
+        {
+          id: 'audio',
+          kind: 'audio',
+          clips: [makeClip('long-music-clip', 'long-music', { inMs: 0, outMs: 10_000, startMs: 0, volume: 0.5 })],
+          items: [],
+        },
+      ],
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    };
+
+    const outPath = path.join(f.dir, 'no-tail.mp4');
+    const plan = buildRenderPlan(project, {
+      assetPaths: assetPathsOf(project),
+      quality: 'draft',
+      outPath,
+      textFileDir: f.dir,
+    });
+    // 3000 + 3000 - 500 ms of transition; the music is cut at that point.
+    expect(plan.durationMs).toBe(5500);
+    expect(plan.args[plan.args.indexOf('-t') + 1]).toBe('5.500');
+    expect(plan.filterGraph).toContain('afade=t=out:st=5.200:d=0.300');
+
+    const result = await exportProject(project, {
+      outPath,
+      assetPaths: assetPathsOf(project),
+      quality: 'draft',
+    });
+    expect(result.durationMs).toBe(5500);
+
+    const probe = await probeMedia(outPath);
+    expect(probe.hasAudio).toBe(true);
+    expect(Math.abs(probe.durationMs - 5500)).toBeLessThanOrEqual(100);
   });
 
   it('resolves an encoder from the probed list and maps quality args', () => {

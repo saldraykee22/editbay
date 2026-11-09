@@ -47,14 +47,14 @@ describe('audit: transition-aware timeline math', () => {
     expect(timelineDurationMs(project)).toBe(2500);
   });
 
-  it('ignores a muted audio track when sizing the project', () => {
+  it('sizes the project by its picture, not by a longer music bed', () => {
     const project = withVideo([clip('c1', 'a1', 0, 5000)], [asset('a1', 'video', 5000), asset('m1', 'audio', 60000)]);
     const audio = project.tracks.find((track) => track.kind === 'audio')!;
     audio.clips = [clip('c9', 'm1', 0, 60000)];
+    // Audio is trimmed at the project end, so a long bed never adds a black tail.
+    expect(projectDurationMs(project)).toBe(5000);
     audio.muted = true;
     expect(projectDurationMs(project)).toBe(5000);
-    audio.muted = false;
-    expect(projectDurationMs(project)).toBe(60000);
   });
 });
 

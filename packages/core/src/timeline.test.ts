@@ -8,6 +8,7 @@ import {
   findClip,
   findTextItem,
   mainVideoTrack,
+  projectDurationMs,
   textTrack,
   timelineDurationMs,
   videoClipStartMs,
@@ -82,6 +83,81 @@ describe('timeline math', () => {
       },
     });
     expect(timelineDurationMs(project)).toBe(13_000);
+  });
+});
+
+describe('projectDurationMs: picture defines the length', () => {
+  function addMusic(project: Project, startMs: number, outMs: number, muted = false): void {
+    const track = audioTrack(project);
+    track.muted = muted;
+    track.clips.push(clip('c_music', { assetId: 'a_music', startMs, outMs }));
+  }
+
+  function musicProject(): Project {
+    const project = fixture();
+    project.assets.push({
+      id: 'a_music',
+      kind: 'audio',
+      uri: 'secret/path/music.m4a',
+      label: 'music.m4a',
+      durationMs: 120_000,
+    });
+    return project;
+  }
+
+  it('keeps the video length when the video is longer than the music', () => {
+    const project = musicProject();
+    addMusic(project, 1000, 4000);
+    expect(projectDurationMs(project)).toBe(10_000);
+  });
+
+  it('does not stretch to a music bed that outlasts the picture', () => {
+    const project = musicProject();
+    addMusic(project, 0, 30_000);
+    expect(projectDurationMs(project)).toBe(10_000);
+    expect(timelineDurationMs(project)).toBe(10_000);
+  });
+
+  it('uses the audio end when the project has no picture at all', () => {
+    const project = createEmptyProject('Music only');
+    project.assets.push({
+      id: 'a_music',
+      kind: 'audio',
+      uri: 'secret/path/music.m4a',
+      label: 'music.m4a',
+      durationMs: 120_000,
+    });
+    addMusic(project, 1000, 3000);
+    expect(projectDurationMs(project)).toBe(4000);
+  });
+
+  it('uses the text end when a text item outlasts the video', () => {
+    const project = fixture();
+    textTrack(project).items.push({
+      id: 'ti_long',
+      text: 'credits',
+      startMs: 12_000,
+      durationMs: 3000,
+      style: {
+        fontFamily: 'Inter',
+        fontSize: 40,
+        fontWeight: 400,
+        color: '#fff',
+        align: 'center',
+        x: 0.5,
+        y: 0.5,
+      },
+    });
+    expect(projectDurationMs(project)).toBe(15_000);
+  });
+
+  it('subtracts transition overlap from the video end', () => {
+    const project = createEmptyProject('Overlap');
+    mainVideoTrack(project).clips.push(
+      clip('c_1', { transitionOut: { id: 'tr_1', type: 'fade', durationMs: 500 } }),
+      clip('c_2'),
+    );
+    expect(projectDurationMs(project)).toBe(7500);
   });
 });
 
